@@ -1,0 +1,12 @@
+*.txt
+*.log
+*.pid
+logs/
+*.logpath
+
+# Ignore all directories except the templates folder
+**/
+!templates/
+!templates/**
+!.gitignore
+.env
