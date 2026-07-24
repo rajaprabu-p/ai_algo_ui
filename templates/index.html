@@ -1,0 +1,1195 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RP Algo Strategy</title>
+    <meta name="description" content="RP Algo is a NIFTY options trading control panel for backtest, paper trade, and live order execution with logs and PnL tracking." />
+    <meta name="keywords" content="RP Algo, algo trading, NIFTY options, paper trading, backtesting, live order, trading dashboard, Zerodha Kite" />
+    <meta name="author" content="RP Algo" />
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#0f766e" />
+    <meta property="og:title" content="RP Algo Strategy" />
+    <meta property="og:description" content="NIFTY options trading dashboard for backtest, paper trade, and live order execution." />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="RP Algo" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="RP Algo Strategy" />
+    <meta name="twitter:description" content="NIFTY options trading dashboard with logs and PnL analytics." />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%230f766e'/%3E%3Cstop offset='100%25' stop-color='%231d4ed8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M14 44h36' stroke='%23dcfce7' stroke-width='3' stroke-linecap='round' opacity='.95'/%3E%3Cpath d='M18 39l8-6 7 2 8-10 11-4' fill='none' stroke='%23ffffff' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ctext x='32' y='34' text-anchor='middle' font-family='Arial, sans-serif' font-size='24' font-weight='700' fill='%23fbbf24'%3E%E2%82%B9%3C/text%3E%3C/svg%3E" />
+    <style>
+      :root {
+        --bg-top: #f8fbff;
+        --bg-bottom: #eef6f3;
+        --card-bg: #ffffff;
+        --card-border: #d8e6df;
+        --section-head-bg: linear-gradient(90deg, #0f766e 0%, #1d4ed8 100%);
+        --section-head-text: #ffffff;
+        --btn-bg: #0f766e;
+        --btn-hover: #0b5f58;
+        --btn-text: #ffffff;
+        --text-main: #0f172a;
+        --muted: #475569;
+        --shadow-soft: 0 8px 24px rgba(15, 23, 42, 0.08);
+      }
+
+      body {
+        font-family: Arial, sans-serif;
+        margin: 2rem;
+        color: var(--text-main);
+        background:
+          radial-gradient(circle at 10% 10%, rgba(29, 78, 216, 0.10), transparent 35%),
+          radial-gradient(circle at 90% 20%, rgba(15, 118, 110, 0.12), transparent 40%),
+          linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+      }
+
+      h1 {
+        margin-top: 0;
+        margin-bottom: 1rem;
+        color: #0b3f6e;
+        letter-spacing: 0.3px;
+      }
+      .page-title {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+      }
+      .site-keywords {
+        margin: -0.4rem 0 1rem;
+        color: #334155;
+        font-size: 0.86rem;
+        letter-spacing: 0.2px;
+      }
+      .page-title-icon {
+        width: 1.35rem;
+        height: 1.35rem;
+        flex: 0 0 auto;
+        display: inline-block;
+        border-radius: 0.35rem;
+        background: linear-gradient(135deg, #0f766e, #1d4ed8);
+        box-shadow: 0 2px 8px rgba(15, 118, 110, 0.22);
+        position: relative;
+      }
+      .page-title-icon::before {
+        content: '';
+        position: absolute;
+        left: 0.20rem;
+        top: 0.18rem;
+        width: 0.95rem;
+        height: 0.92rem;
+        border-radius: 0.22rem;
+        background:
+          linear-gradient(180deg, transparent 0 58%, rgba(220, 252, 231, 0.95) 58% 63%, transparent 63% 100%),
+          linear-gradient(135deg, transparent 0 15%, #ffffff 15% 22%, transparent 22% 42%, #fbbf24 42% 50%, transparent 50% 67%, #ffffff 67% 74%, transparent 74% 100%);
+        transform: none;
+      }
+      .page-title-icon::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        content: '₹';
+        display: block;
+        text-align: center;
+        line-height: 1.35rem;
+        color: #ffffff;
+        font-size: 0.92rem;
+        font-weight: 800;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+      }
+
+      button {
+        padding: 0.55rem 0.9rem;
+        margin-right: 0.4rem;
+        margin-bottom: 0.2rem;
+        border: none;
+        border-radius: 8px;
+        background: var(--btn-bg);
+        color: var(--btn-text);
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.12s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+      }
+
+      button:hover {
+        background: var(--btn-hover);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 10px rgba(15, 118, 110, 0.25);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+
+      select,
+      input[type="date"] {
+        border: 1px solid #bfd3ca;
+        border-radius: 7px;
+        padding: 0.35rem 0.45rem;
+        background: #f9fffc;
+        color: var(--text-main);
+      }
+
+      pre {
+        background: #f8fbff;
+        border: 1px solid #d9e7f5;
+        border-radius: 8px;
+        padding: 1rem;
+        max-height: 260px;
+        overflow: auto;
+        color: #1e293b;
+      }
+
+      .status-ok { color: #166534; font-weight: 600; }
+      .status-fail { color: #b91c1c; font-weight: 600; }
+      .status-running { color: #166534; font-weight: 700; }
+      .status-stopped { color: #b91c1c; font-weight: 700; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1rem; }
+      .card {
+        border: 1px solid var(--card-border);
+        border-radius: 10px;
+        padding: 0.8rem;
+        background: var(--card-bg);
+        box-shadow: var(--shadow-soft);
+      }
+      .card h4 { margin: 0 0 0.6rem 0; }
+      details.section {
+        border: 1px solid var(--card-border);
+        border-radius: 10px;
+        margin-bottom: 1rem;
+        background: #ffffffcc;
+        backdrop-filter: blur(2px);
+        box-shadow: var(--shadow-soft);
+        overflow: hidden;
+      }
+      details.section > summary {
+        cursor: pointer;
+        font-size: 1.05rem;
+        font-weight: 700;
+        padding: 0.8rem 1rem;
+        user-select: none;
+        color: var(--section-head-text);
+        background: var(--section-head-bg);
+      }
+      details.section > summary::-webkit-details-marker { margin-right: 0.4rem; }
+      .section-body { padding: 0.25rem 1rem 0.6rem 1rem; }
+      .section-body > div:first-child { margin-top: 0.35rem; }
+      .card > div:first-child { margin-top: 0.2rem; }
+      #uiInfo {
+        margin: 0.25rem 0 0.9rem;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .pnl-summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        margin-top: 0.5rem;
+      }
+      .pnl-chip {
+        border: 1px solid #d3e4dc;
+        background: #f6fcf9;
+        border-radius: 8px;
+        padding: 0.35rem 0.6rem;
+        font-weight: 600;
+        color: #0f172a;
+      }
+      .table-wrap {
+        overflow: auto;
+        margin-top: 0.6rem;
+        max-height: 300px;
+        border: 1px solid #d9e7f5;
+        border-radius: 8px;
+        background: #f8fbff;
+      }
+      table.pnl-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+      }
+      .pnl-table th,
+      .pnl-table td {
+        padding: 0.45rem 0.5rem;
+        border-bottom: 1px solid #e2ecf7;
+        white-space: nowrap;
+      }
+      .pnl-table thead th {
+        position: sticky;
+        top: 0;
+        background: #eaf2fb;
+        z-index: 1;
+        text-align: left;
+      }
+      .log-files-layout {
+        display: flex;
+        gap: 0.8rem;
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+      .log-files-list select {
+        min-width: 380px;
+        min-height: 260px;
+      }
+      .log-files-actions {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.45rem;
+      }
+      .log-files-actions button {
+        margin-right: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 class="page-title"><span class="page-title-icon" aria-hidden="true"></span><span>RP Algo</span></h1>
+    <div class="site-keywords">Categories: NIFTY Options | Backtest | Paper Trade | Live Order | Logs and PnL Analytics</div>
+
+    <details class="section" open>
+      <summary>Kite Login</summary>
+      <div class="section-body">
+        <div style="margin-bottom:0.2rem">
+          <button id="logout">Logout</button>
+          <button id="kiteLogin">Open Kite Login</button>
+          <button id="kiteLoginTest">Test Kite Login</button>
+          <span id="kiteStatus" style="margin-left:1rem"></span>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary>Log Files</summary>
+      <div class="section-body">
+        <div class="log-files-layout" style="margin-bottom:0.2rem">
+          <div class="log-files-list">
+            <select id="logFileSelect" multiple size="12"></select>
+            <div style="margin-top:0.3rem;color:#475569;font-size:0.88rem">Use Ctrl/Shift to select multiple files</div>
+          </div>
+          <div class="log-files-actions">
+            <button id="loadLogFiles">Refresh Log Files</button>
+            <button id="consolidateLogFiles">Consolidate Selected Logs</button>
+            <button id="deleteLogFiles">Delete Selected Logs</button>
+            <button id="downloadLogFile">Download Selected Log</button>
+            <label style="color:#475569; font-size:0.88rem; font-weight:700;">
+              <input id="allLogFiles" type="checkbox" checked /> All log files
+            </label>
+            <label style="color:#475569; font-size:0.88rem;">
+              <input id="onlyBacktestFiles" type="checkbox" /> Only backtest files
+            </label>
+            <label style="color:#475569; font-size:0.88rem;">
+              <input id="onlyPapertradeFiles" type="checkbox" /> Only papertrade files
+            </label>
+            <label style="color:#475569; font-size:0.88rem;">
+              <input id="onlyConsolidateFiles" type="checkbox" /> Only consolidate files
+            </label>
+            <label style="color:#475569; font-size:0.88rem;">
+              <input id="onlyLivetradeFiles" type="checkbox" /> Only live trade files
+            </label>
+            <span id="consolidateInfo" style="font-size:0.88rem"></span>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary>Selected Log Trade and PnL Details</summary>
+      <div class="section-body">
+        <div class="card">
+          <div>
+            <button id="loadTradeDetails">Load Trade Details</button>
+            <span id="tradeDetailsInfo" style="margin-left:0.6rem"></span>
+          </div>
+          <div class="pnl-summary">
+            <div class="pnl-chip">Rows: <span id="pnlRows">-</span></div>
+            <div class="pnl-chip">Total PnL (Rs): <span id="pnlRs">-</span></div>
+            <div class="pnl-chip">Total PnL (Pts): <span id="pnlPts">-</span></div>
+            <div class="pnl-chip">Wins: <span id="pnlWins">-</span></div>
+            <div class="pnl-chip">Loss/Flat: <span id="pnlLoss">-</span></div>
+          </div>
+          <div class="table-wrap">
+            <table class="pnl-table" id="pnlTable">
+              <thead>
+                <tr>
+                  <th>Source File</th>
+                  <th>Entry Time</th>
+                  <th>Exit Time</th>
+                  <th>Side</th>
+                  <th>Symbol</th>
+                  <th>Spot Price</th>
+                  <th>Entry</th>
+                  <th>Exit</th>
+                  <th>PnL Pts</th>
+                  <th>PnL Rs</th>
+                  <th>Exit Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td colspan="10">No trade details loaded.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <p id="uiInfo"></p>
+    
+    <details class="section" open>
+      <summary>V28 Strategy (Paper Trade or Backtest)</summary>
+      <div class="section-body">
+        <div class="card">
+          <div>
+            <button id="start-v28">Start</button>
+            <button id="stop-v28">Stop</button>
+            <button id="refresh-v28">Refresh</button>
+            <button id="clear-v28">Clear Logs</button>
+            <button id="save-v28">Save Log</button>
+          </div>
+          <div style="margin-top:0.7rem">
+            <label>Mode: <select id="mode-v28"><option value="BACKTEST">BACKTEST</option><option value="PAPERTRADE_LIVE">PAPERTRADE_LIVE</option></select></label>
+            <label style="margin-left:1rem">Date: <input id="date-v28" type="date" /></label>
+          </div>
+          <p>Status: <span id="status-v28">unknown</span></p>
+          <pre id="logs-v28">(no logs)</pre>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary>V30 Strategy (Paper Trade or Backtest)</summary>
+      <div class="section-body">
+        <div class="card">
+          <div>
+            <button id="start-v30">Start</button>
+            <button id="stop-v30">Stop</button>
+            <button id="refresh-v30">Refresh</button>
+            <button id="clear-v30">Clear Logs</button>
+            <button id="save-v30">Save Log</button>
+          </div>
+          <div style="margin-top:0.7rem">
+            <label>Mode: <select id="mode-v30"><option value="BACKTEST">BACKTEST</option><option value="PAPERTRADE_LIVE">PAPERTRADE_LIVE</option></select></label>
+            <label style="margin-left:1rem">Date: <input id="date-v30" type="date" /></label>
+          </div>
+          <p>Status: <span id="status-v30">unknown</span></p>
+          <pre id="logs-v30">(no logs)</pre>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary>Live Order Runner (v28 or v30)</summary>
+      <div class="section-body">
+        <div class="card">
+          <div>
+            <button id="start-live-order-only">Start LIVE_ORDER</button>
+            <button id="stop-live-order-only">Stop</button>
+            <button id="refresh-live-order-only">Refresh</button>
+            <button id="clear-live-order-only">Clear Logs</button>
+            <button id="save-live-order-only">Save Log</button>
+          </div>
+          <div style="margin-top:0.7rem">
+            <label>Strategy:
+              <select id="strategy-live-order-only">
+                <option value="v28">v28</option>
+                <option value="v30" selected>v30</option>
+              </select>
+            </label>
+            <span style="margin-left:0.8rem;color:#475569;font-size:0.9rem">Mode is fixed to LIVE_ORDER</span>
+          </div>
+          <p>Status: <span id="status-live-order-only">unknown</span></p>
+          <pre id="logs-live-order-only">(no logs)</pre>
+        </div>
+      </div>
+    </details>
+
+    
+
+    <script>
+      const STRATEGIES = {
+        v28: { name: 'v28', script: 'v28_50pt_strategy_main.py' },
+        v30: { name: 'v30', script: 'v30_50pt_strategy_main.py' }
+      };
+
+      const LIVE_ORDER_ONLY = {
+        scripts: {
+          v28: STRATEGIES.v28.script,
+          v30: STRATEGIES.v30.script
+        }
+      };
+
+      function getLiveOrderName() {
+        const sel = document.getElementById('strategy-live-order-only');
+        const base = (sel && sel.value) ? sel.value : 'v30';
+        // Use a distinct name for the live-only runner to avoid name collisions
+        // with the regular strategy processes (e.g. 'v30').
+        return 'live_' + base;
+      }
+
+      function showInfo(msg, ok=true){
+        const el = document.getElementById('uiInfo');
+        el.className = ok ? 'status-ok' : 'status-fail';
+        el.textContent = msg || '';
+      }
+
+      function setRunningControls(key, isRunning){
+        document.getElementById('start-' + key).disabled = !!isRunning;
+        document.getElementById('mode-' + key).disabled = !!isRunning;
+        document.getElementById('stop-' + key).disabled = !isRunning;
+      }
+
+      function modeStorageKey(key){
+        return 'rp_algo_mode_' + key;
+      }
+
+      function saveModeSelection(key){
+        try{
+          const el = document.getElementById('mode-' + key);
+          if(!el) return;
+          localStorage.setItem(modeStorageKey(key), String(el.value || ''));
+        }catch(e){}
+      }
+
+      function restoreModeSelection(key){
+        try{
+          const el = document.getElementById('mode-' + key);
+          if(!el) return;
+          const saved = localStorage.getItem(modeStorageKey(key));
+          if(!saved) return;
+          const options = Array.from(el.options || []).map(o => o.value);
+          if(options.includes(saved)){
+            el.value = saved;
+          }
+        }catch(e){}
+      }
+
+      function syncModeFromStatus(key, mode){
+        const m = String(mode || '').trim();
+        if(!m) return;
+        const el = document.getElementById('mode-' + key);
+        if(!el) return;
+        const options = Array.from(el.options || []).map(o => o.value);
+        if(options.includes(m) && el.value !== m){
+          el.value = m;
+          saveModeSelection(key);
+        }
+      }
+
+      function setLiveOrderOnlyControls(isRunning){
+        document.getElementById('start-live-order-only').disabled = !!isRunning;
+        document.getElementById('strategy-live-order-only').disabled = !!isRunning;
+        document.getElementById('stop-live-order-only').disabled = !isRunning;
+      }
+
+      const stopInProgress = {
+        v28: false,
+        v30: false,
+        live_order_only: false
+      };
+
+      function setStopInProgressState(key, inProgress){
+        stopInProgress[key] = !!inProgress;
+        if(key === 'live_order_only'){
+          const stopBtn = document.getElementById('stop-live-order-only');
+          if(stopBtn){
+            stopBtn.disabled = !!inProgress;
+          }
+          return;
+        }
+        const stopBtn = document.getElementById('stop-' + key);
+        if(stopBtn){
+          stopBtn.disabled = !!inProgress;
+        }
+      }
+
+      function formatShutdownSummary(summary){
+        if(!summary || typeof summary !== 'object') return '';
+        const parts = [];
+        if(summary.run_mode) parts.push('mode=' + summary.run_mode);
+        if(summary.trigger) parts.push('trigger=' + summary.trigger);
+        if(Number.isFinite(Number(summary.total_trades))) parts.push('trades=' + Number(summary.total_trades));
+        if(Number.isFinite(Number(summary.net_pnl_rs))) parts.push('net=' + Number(summary.net_pnl_rs).toFixed(2) + ' Rs');
+        if(summary.open_position) parts.push('open=' + summary.open_position);
+        return parts.join(', ');
+      }
+
+      function appendShutdownSummaryToLog(logElementId, summary){
+        if(!summary || typeof summary !== 'object') return;
+        const raw = String(summary.raw || '').trim();
+        if(!raw) return;
+        const pre = document.getElementById(logElementId);
+        if(!pre) return;
+        const existing = String(pre.textContent || '');
+        if(existing.includes(raw)) return;
+        pre.textContent = (existing ? (existing + '\n') : '') + raw + '\n';
+      }
+
+      function runningStatusText(j){
+        if(!j || !j.running) return 'stopped';
+        const mode = String(j.mode || '').trim();
+        if(mode){
+          return 'running (pid:' + j.pid + ', mode:' + mode + ')';
+        }
+        return 'running (pid:' + j.pid + ')';
+      }
+
+      async function status(key){
+        const cfg = STRATEGIES[key];
+        const r = await fetch('/api/status?name=' + encodeURIComponent(cfg.name));
+        const j = await r.json();
+        syncModeFromStatus(key, j.mode);
+        const statusEl = document.getElementById('status-' + key);
+        statusEl.textContent = runningStatusText(j);
+        statusEl.className = j.running ? 'status-running' : 'status-stopped';
+        setRunningControls(key, j.running);
+      }
+
+      async function loadLogs(key){
+        const cfg = STRATEGIES[key];
+        const r = await fetch('/api/logs?name=' + encodeURIComponent(cfg.name));
+        const j = await r.json();
+        document.getElementById('logs-' + key).textContent = j.exists ? j.tail : '(no logs yet)';
+      }
+
+      async function statusLiveOrderOnly(){
+        const r = await fetch('/api/status?name=' + encodeURIComponent(getLiveOrderName()));
+        const j = await r.json();
+        const statusEl = document.getElementById('status-live-order-only');
+        statusEl.textContent = runningStatusText(j);
+        statusEl.className = j.running ? 'status-running' : 'status-stopped';
+        setLiveOrderOnlyControls(j.running);
+      }
+
+      async function loadLogsLiveOrderOnly(){
+        const r = await fetch('/api/logs?name=' + encodeURIComponent(getLiveOrderName()));
+        const j = await r.json();
+        document.getElementById('logs-live-order-only').textContent = j.exists ? j.tail : '(no logs yet)';
+      }
+
+      async function startLiveOrderOnly(){
+        const strategyKey = document.getElementById('strategy-live-order-only').value;
+        const script = LIVE_ORDER_ONLY.scripts[strategyKey] || LIVE_ORDER_ONLY.scripts.v30;
+        const confirmed = confirm(
+          'Confirm LIVE_ORDER start for ' + strategyKey.toUpperCase() + '?\\n\\n' +
+          'This places real orders in the selected strategy.'
+        );
+        if(!confirmed){
+          showInfo('LIVE_ORDER start cancelled.', false);
+          return;
+        }
+        // Clear the log box immediately
+        const liveLogEl = document.getElementById('logs-live-order-only');
+        if(liveLogEl) liveLogEl.textContent = 'Starting LIVE_ORDER...';
+        const payload = {
+          args: [],
+          // use a distinct name so starting PAPERTRADE/LIVE_ORDER for a
+          // strategy doesn't accidentally collide with the core strategy
+          // process started via the main panel.
+          name: getLiveOrderName(),
+          script,
+          mode: 'LIVE_ORDER'
+        };
+        const r = await fetch('/api/start', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json();
+        if(j.ok){
+          showInfo('LIVE_ORDER start requested for ' + strategyKey.toUpperCase() + ': ' + j.msg, true);
+        } else {
+          alert('LIVE_ORDER start failed: ' + j.msg);
+          showInfo('LIVE_ORDER start failed: ' + j.msg, false);
+        }
+        await statusLiveOrderOnly();
+        await loadLogsLiveOrderOnly();
+      }
+
+      async function stopLiveOrderOnly(){
+        if(stopInProgress.live_order_only){
+          return;
+        }
+        setStopInProgressState('live_order_only', true);
+        showInfo('LIVE_ORDER runner: stopping gracefully... waiting for shutdown summary.', true);
+        try{
+          const r = await fetch('/api/stop', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: getLiveOrderName()})
+          });
+          const j = await r.json();
+          const summaryLine = formatShutdownSummary(j.shutdown_summary);
+          let text = 'LIVE_ORDER runner: ' + (j.ok ? 'Stopped: ' : 'Stop failed: ') + j.msg;
+          if(summaryLine){
+            text += ' | ' + summaryLine;
+          }
+          appendShutdownSummaryToLog('logs-live-order-only', j.shutdown_summary);
+          showInfo(text, !!j.ok);
+          await statusLiveOrderOnly();
+          await loadLogsLiveOrderOnly();
+        } finally {
+          setStopInProgressState('live_order_only', false);
+          await statusLiveOrderOnly();
+        }
+      }
+
+      async function clearLogsLiveOrderOnly(){
+        if(!confirm('Clear server log for LIVE_ORDER runner? This will remove existing log content.')) return;
+        const r = await fetch('/api/clear-logs', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: getLiveOrderName()})
+        });
+        const j = await r.json().catch(() => ({ok:false,msg:'no-response'}));
+        if(!j.ok){
+          alert('Clear failed: ' + j.msg);
+          return;
+        }
+        await loadLogsLiveOrderOnly();
+        showInfo('LIVE_ORDER runner logs cleared.', true);
+      }
+
+      async function start(key){
+        const cfg = STRATEGIES[key];
+        // Clear the log box immediately so stale output from the previous run is gone
+        const logEl = document.getElementById('logs-' + key);
+        if(logEl) logEl.textContent = 'Starting...';
+        const payload = {
+          args: [],
+          name: cfg.name,
+          script: cfg.script,
+          mode: document.getElementById('mode-' + key).value,
+          date: document.getElementById('date-' + key).value
+        };
+        const r = await fetch('/api/start', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json();
+        if(j.ok){
+          showInfo(cfg.script + ' start requested: ' + j.msg, true);
+        } else {
+          alert(cfg.script + ' start failed: ' + j.msg);
+          showInfo(cfg.script + ' start failed: ' + j.msg, false);
+        }
+        await status(key);
+        await loadLogs(key);
+      }
+
+      async function stop(key){
+        if(stopInProgress[key]){
+          return;
+        }
+        const cfg = STRATEGIES[key];
+        setStopInProgressState(key, true);
+        showInfo(cfg.script + ': stopping gracefully... waiting for shutdown summary.', true);
+        try{
+          const r = await fetch('/api/stop', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: cfg.name})
+          });
+          const j = await r.json();
+          const summaryLine = formatShutdownSummary(j.shutdown_summary);
+          let text = cfg.script + ': ' + (j.ok ? 'Stopped: ' : 'Stop failed: ') + j.msg;
+          if(summaryLine){
+            text += ' | ' + summaryLine;
+          }
+          appendShutdownSummaryToLog('logs-' + key, j.shutdown_summary);
+          showInfo(text, !!j.ok);
+          await status(key);
+          await loadLogs(key);
+        } finally {
+          setStopInProgressState(key, false);
+          await status(key);
+        }
+      }
+
+      async function clearLogs(key){
+        const cfg = STRATEGIES[key];
+        if(!confirm('Clear server log for ' + key.toUpperCase() + '? This will remove existing log content.')) return;
+        const r = await fetch('/api/clear-logs', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: cfg.name})
+        });
+        const j = await r.json().catch(() => ({ok:false,msg:'no-response'}));
+        if(!j.ok){
+          alert('Clear failed: ' + j.msg);
+          return;
+        }
+        await loadLogs(key);
+        if(key === 'v28'){
+          showInfo('v28_50pt_strategy_main.py logs cleared.', true);
+          return;
+        }
+        showInfo(cfg.script + ' logs cleared.', true);
+      }
+
+      async function refreshAuto(){
+        await Promise.all([
+          status('v28'),
+          status('v30'),
+          loadLogs('v28'),
+          loadLogs('v30'),
+          statusLiveOrderOnly(),
+          loadLogsLiveOrderOnly()
+        ]);
+      }
+
+      async function loadLogFilesList(){
+        const select = document.getElementById('logFileSelect');
+        const allLogFiles = !!document.getElementById('allLogFiles')?.checked;
+        const onlyBacktest = !!document.getElementById('onlyBacktestFiles')?.checked;
+        const onlyPapertrade = !!document.getElementById('onlyPapertradeFiles')?.checked;
+        const onlyConsolidate = !!document.getElementById('onlyConsolidateFiles')?.checked;
+        const onlyLivetrade = !!document.getElementById('onlyLivetradeFiles')?.checked;
+        const consolidateInfo = document.getElementById('consolidateInfo');
+        const r = await fetch('/api/log-files');
+        const j = await r.json().catch(() => ({ok:false,msg:'Invalid response',files:[]}));
+        if(!r.ok || !j.ok){
+          showInfo('Failed to load log files: ' + (j.msg || ('HTTP ' + r.status)), false);
+          updateConsolidateButtonState();
+          return;
+        }
+        select.innerHTML = '';
+        if(consolidateInfo){
+          consolidateInfo.className = '';
+          consolidateInfo.textContent = '';
+        }
+        const files = Array.isArray(j.files) ? j.files : [];
+        const xlsxFiles = files.filter(f => /\.xlsx$/i.test(String(f?.name || '')));
+        let filteredFiles = xlsxFiles;
+        const activeFilters = [];
+        if(!allLogFiles){
+          if(onlyBacktest) activeFilters.push(f => /^backtest_.*\.xlsx$/i.test(String(f?.name || '')));
+          if(onlyPapertrade) activeFilters.push(f => /^papertrade_.*\.xlsx$/i.test(String(f?.name || '')));
+          if(onlyConsolidate) activeFilters.push(f => /^consolidated_.*\.xlsx$/i.test(String(f?.name || '')));
+          if(onlyLivetrade) activeFilters.push(f => {
+            const n = String(f?.name || '').toLowerCase();
+            return n.includes('livetrade') || n.includes('live_order') || n === 'strategy_v28.log' || n === 'strategy_v30.log';
+          });
+        }
+        if(activeFilters.length > 0){
+          filteredFiles = xlsxFiles.filter(f => activeFilters.some(fn => fn(f)));
+        }
+
+        const filterParts = [];
+        if(onlyBacktest) filterParts.push('backtest');
+        if(onlyPapertrade) filterParts.push('papertrade');
+        if(onlyConsolidate) filterParts.push('consolidate');
+        if(onlyLivetrade) filterParts.push('live-trade');
+        if(allLogFiles) filterParts.push('all');
+        const filterLabel = filterParts.length > 0 ? filterParts.join('/') : null;
+
+        if(filteredFiles.length === 0){
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = filterLabel
+            ? 'No ' + filterLabel + ' .xlsx files found in logs folder'
+            : 'No .xlsx files found in logs folder';
+          select.appendChild(opt);
+          showInfo(filterLabel ? 'No ' + filterLabel + ' .xlsx files found.' : 'No .xlsx log files found.', false);
+          updateConsolidateButtonState();
+          return;
+        }
+        for(const file of filteredFiles){
+          const opt = document.createElement('option');
+          opt.value = file.name;
+          opt.textContent = file.name + ' (' + file.size + ' bytes)';
+          select.appendChild(opt);
+        }
+        showInfo('Loaded ' + filteredFiles.length + (filterLabel ? ' ' + filterLabel : '') + ' file(s) from logs folder.', true);
+        updateConsolidateButtonState();
+      }
+
+      function setTradeDetailsTableRows(rows){
+        const tbody = document.querySelector('#pnlTable tbody');
+        if(!rows || rows.length === 0){
+          tbody.innerHTML = '<tr><td colspan="11">No trade rows found in selected file(s).</td></tr>';
+          return;
+        }
+
+        function fmt2(v){
+          const n = Number(v);
+          return Number.isFinite(n) ? n.toFixed(2) : '-';
+        }
+
+        const html = rows.map(r => {
+          const rs = Number(r.pnl_rs ?? 0);
+          const spotPrice = (r.entry_spot ?? r.signal_spot_price ?? r.exit_spot);
+          const color = rs > 0 ? '#166534' : (rs < 0 ? '#b91c1c' : '#0f172a');
+          return '<tr>' +
+            '<td>' + (r.source_file ?? '-') + '</td>' +
+            '<td>' + (r.entry_time ?? '-') + '</td>' +
+            '<td>' + (r.exit_time ?? '-') + '</td>' +
+            '<td>' + (r.side ?? '-') + '</td>' +
+            '<td>' + (r.option_symbol ?? '-') + '</td>' +
+            '<td>' + fmt2(spotPrice) + '</td>' +
+            '<td>' + fmt2(r.entry_price) + '</td>' +
+            '<td>' + fmt2(r.exit_price) + '</td>' +
+            '<td>' + fmt2(r.pnl_points) + '</td>' +
+            '<td style="color:' + color + ';font-weight:700">' + fmt2(r.pnl_rs) + '</td>' +
+            '<td>' + (r.exit_reason ?? '-') + '</td>' +
+          '</tr>';
+        }).join('');
+        tbody.innerHTML = html;
+      }
+
+      function isBacktestFileName(name){
+        const n = String(name || '');
+        return /^backtest_.*\.xlsx$/i.test(n) || /^papertrade_.*\.xlsx$/i.test(n);
+      }
+
+      function updateConsolidateButtonState(){
+        const sel = document.getElementById('logFileSelect');
+        const btn = document.getElementById('consolidateLogFiles');
+        const infoEl = document.getElementById('consolidateInfo');
+        if(!sel || !btn) return;
+
+        const names = Array.from(sel.selectedOptions || []).map(o => o.value).filter(Boolean);
+        if(names.length === 0){
+          btn.disabled = true;
+          return;
+        }
+
+        const hasInvalid = names.some(n => !isBacktestFileName(n));
+        btn.disabled = hasInvalid;
+        if(hasInvalid && infoEl){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Consolidation allows only backtest_*.xlsx or papertrade_*.xlsx selection.';
+        }
+      }
+
+      function getSelectedLogFiles(){
+        const sel = document.getElementById('logFileSelect');
+        let names = Array.from(sel.selectedOptions || []).map(o => o.value).filter(Boolean);
+        if(names.length === 0 && sel.options.length > 0){
+          names = [sel.options[0].value];
+          sel.options[0].selected = true;
+        }
+        return names;
+      }
+
+      async function loadTradeDetailsFromSelectedLog(){
+        const names = getSelectedLogFiles();
+        const infoEl = document.getElementById('tradeDetailsInfo');
+        if(!names || names.length === 0){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Select at least one log file first.';
+          return;
+        }
+
+        infoEl.className = '';
+        infoEl.textContent = 'Loading...';
+
+        const r = await fetch('/api/log-files/trade-details-consolidated', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ files: names })
+        });
+        const j = await r.json().catch(() => ({ok:false,msg:'Invalid response'}));
+        if(!r.ok || !j.ok){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Failed: ' + (j.msg || ('HTTP ' + r.status));
+          return;
+        }
+
+        document.getElementById('pnlRows').textContent = String(j.total_rows ?? '-');
+        document.getElementById('pnlRs').textContent = Number(j.summary?.total_pnl_rs ?? 0).toFixed(2);
+        document.getElementById('pnlPts').textContent = Number(j.summary?.total_pnl_points ?? 0).toFixed(2);
+        document.getElementById('pnlWins').textContent = String(j.summary?.win_trades ?? '-');
+        document.getElementById('pnlLoss').textContent = String(j.summary?.loss_or_flat_trades ?? '-');
+
+        setTradeDetailsTableRows(j.rows || []);
+        infoEl.className = 'status-ok';
+        infoEl.textContent = 'Loaded consolidated details from ' + names.length + ' file(s).';
+      }
+
+      async function consolidateSelectedLogs(){
+        const sel = document.getElementById('logFileSelect');
+        const btn = document.getElementById('consolidateLogFiles');
+        const infoEl = document.getElementById('consolidateInfo');
+        const names = Array.from(sel.selectedOptions || []).map(o => o.value).filter(Boolean);
+
+        if(names.length === 0){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Select one or more source files first.';
+          showInfo('Select files from the list to generate consolidated log.', false);
+          updateConsolidateButtonState();
+          return;
+        }
+
+        if(names.some(n => !isBacktestFileName(n))){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Only backtest_*.xlsx or papertrade_*.xlsx files can be consolidated.';
+          showInfo('Remove non-backtest/papertrade files from selection.', false);
+          updateConsolidateButtonState();
+          return;
+        }
+
+        btn.disabled = true;
+        infoEl.className = '';
+        infoEl.textContent = 'Generating consolidated log...';
+
+        const r = await fetch('/api/log-files/consolidate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ files: names })
+        });
+        const j = await r.json().catch(() => ({ok:false,msg:'Invalid response'}));
+
+        btn.disabled = false;
+
+        if(!r.ok || !j.ok){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Failed: ' + (j.msg || ('HTTP ' + r.status));
+          showInfo('Consolidation failed: ' + (j.msg || ('HTTP ' + r.status)), false);
+          updateConsolidateButtonState();
+          return;
+        }
+
+        await loadLogFilesList();
+        if(j.output_file){
+          const options = Array.from(sel.options || []);
+          for(const o of options){
+            o.selected = (o.value === j.output_file);
+          }
+        }
+
+        infoEl.className = 'status-ok';
+        infoEl.textContent = 'Generated: ' + (j.output_file || 'consolidated_backtest.xlsx');
+        showInfo('Consolidated log generated from ' + (j.files_processed?.length || names.length) + ' selected file(s).', true);
+        updateConsolidateButtonState();
+      }
+
+      async function deleteSelectedLogFiles(){
+        const names = getSelectedLogFiles();
+        if(!names || names.length === 0){
+          showInfo('Select one or more files to delete.', false);
+          return;
+        }
+
+        const lines = names.slice(0, 8).map(n => '- ' + n);
+        const more = names.length > 8 ? ('\n- ... and ' + (names.length - 8) + ' more') : '';
+        const confirmMsg =
+          'Delete selected log files?\n\n' +
+          lines.join('\n') +
+          more +
+          '\n\nThis action cannot be undone.';
+        if(!confirm(confirmMsg)){
+          showInfo('Delete cancelled.', false);
+          return;
+        }
+
+        const r = await fetch('/api/log-files/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ files: names })
+        });
+        const j = await r.json().catch(() => ({ok:false,msg:'Invalid response'}));
+        if(!r.ok){
+          showInfo('Delete failed: ' + (j.msg || ('HTTP ' + r.status)), false);
+          return;
+        }
+
+        const deletedCount = Array.isArray(j.deleted) ? j.deleted.length : 0;
+        const failedCount = Array.isArray(j.failed) ? j.failed.length : 0;
+        const notFoundCount = Array.isArray(j.not_found) ? j.not_found.length : 0;
+
+        await loadLogFilesList();
+        await loadTradeDetailsFromSelectedLog();
+
+        if(failedCount > 0){
+          showInfo('Deleted ' + deletedCount + ' file(s), failed ' + failedCount + ', not found ' + notFoundCount + '.', false);
+          return;
+        }
+
+        showInfo('Deleted ' + deletedCount + ' file(s).' + (notFoundCount > 0 ? (' Not found: ' + notFoundCount + '.') : ''), true);
+      }
+
+      document.getElementById('start-v28').addEventListener('click', async () => { await start('v28'); });
+      document.getElementById('stop-v28').addEventListener('click', async () => { await stop('v28'); });
+      document.getElementById('refresh-v28').addEventListener('click', async () => { await status('v28'); await loadLogs('v28'); });
+      document.getElementById('clear-v28').addEventListener('click', async () => { await clearLogs('v28'); });
+      document.getElementById('mode-v28').addEventListener('change', () => { saveModeSelection('v28'); });
+
+      document.getElementById('start-v30').addEventListener('click', async () => { await start('v30'); });
+      document.getElementById('stop-v30').addEventListener('click', async () => { await stop('v30'); });
+      document.getElementById('refresh-v30').addEventListener('click', async () => { await status('v30'); await loadLogs('v30'); });
+      document.getElementById('clear-v30').addEventListener('click', async () => { await clearLogs('v30'); });
+      document.getElementById('mode-v30').addEventListener('change', () => { saveModeSelection('v30'); });
+
+      document.getElementById('start-live-order-only').addEventListener('click', async () => { await startLiveOrderOnly(); });
+      document.getElementById('stop-live-order-only').addEventListener('click', async () => { await stopLiveOrderOnly(); });
+      document.getElementById('refresh-live-order-only').addEventListener('click', async () => { await statusLiveOrderOnly(); await loadLogsLiveOrderOnly(); });
+      document.getElementById('clear-live-order-only').addEventListener('click', async () => { await clearLogsLiveOrderOnly(); });
+
+      document.getElementById('kiteLogin').addEventListener('click', async () => {
+        const r = await fetch('/api/kite/login_url');
+        const j = await r.json();
+        if(!j.ok){ alert('Error: ' + j.msg); return; }
+        window.open(j.login_url, '_blank');
+        document.getElementById('kiteStatus').textContent = 'Opened login page. Set redirect URL in Kite app to: ' + j.redirect;
+      });
+
+      document.getElementById('kiteLoginTest').addEventListener('click', async () => {
+        const statusEl = document.getElementById('kiteStatus');
+        statusEl.className = '';
+        statusEl.textContent = 'Running Kite login test...';
+        const r = await fetch('/api/kite/test_login', { method: 'POST' });
+        const j = await r.json().catch(() => ({ok:false,msg:'Invalid server response'}));
+        if(!r.ok && !j.output){
+          alert('Error: ' + (j.msg || ('HTTP ' + r.status)));
+          return;
+        }
+        const pre = document.getElementById('logs-v28');
+        const resultTag = j.ok ? 'PASS' : 'FAIL';
+        pre.textContent += '\n\n=== Kite Login Test Result: ' + resultTag + ' ===\n' + (j.output || '(no output)') + '\n';
+        pre.scrollTop = pre.scrollHeight;
+        statusEl.className = j.ok ? 'status-ok' : 'status-fail';
+        if(j.ok && j.kite_user_details){
+          const d = j.kite_user_details;
+          const parts = [];
+          if(d.user_id) parts.push('User ID: ' + d.user_id);
+          if(d.user_name) parts.push('Name: ' + d.user_name);
+          statusEl.textContent = 'Kite login test passed' + (parts.length ? ' | ' + parts.join(' | ') : '');
+        } else {
+          statusEl.textContent = (j.msg || 'Kite login test completed') + (j.exit_code !== undefined ? (' (exit: ' + j.exit_code + ')') : '');
+        }
+        await loadLogs('v28');
+      });
+
+      document.getElementById('loadLogFiles').addEventListener('click', async () => {
+        await loadLogFilesList();
+      });
+
+      document.getElementById('logFileSelect').addEventListener('change', () => {
+        updateConsolidateButtonState();
+      });
+
+      document.getElementById('onlyBacktestFiles').addEventListener('change', async () => {
+        document.getElementById('allLogFiles').checked = false;
+        await loadLogFilesList();
+      });
+
+      document.getElementById('onlyPapertradeFiles').addEventListener('change', async () => {
+        document.getElementById('allLogFiles').checked = false;
+        await loadLogFilesList();
+      });
+
+      document.getElementById('onlyConsolidateFiles').addEventListener('change', async () => {
+        document.getElementById('allLogFiles').checked = false;
+        await loadLogFilesList();
+      });
+
+      document.getElementById('onlyLivetradeFiles').addEventListener('change', async () => {
+        document.getElementById('allLogFiles').checked = false;
+        await loadLogFilesList();
+      });
+
+      document.getElementById('allLogFiles').addEventListener('change', async (e) => {
+        const isAll = !!e.target?.checked;
+        if(isAll){
+          document.getElementById('onlyBacktestFiles').checked = false;
+          document.getElementById('onlyPapertradeFiles').checked = false;
+          document.getElementById('onlyConsolidateFiles').checked = false;
+          document.getElementById('onlyLivetradeFiles').checked = false;
+        }
+        await loadLogFilesList();
+      });
+
+      document.getElementById('consolidateLogFiles').addEventListener('click', async () => {
+        await consolidateSelectedLogs();
+      });
+
+      document.getElementById('deleteLogFiles').addEventListener('click', async () => {
+        await deleteSelectedLogFiles();
+      });
+
+      document.getElementById('downloadLogFile').addEventListener('click', async () => {
+        const names = getSelectedLogFiles();
+        const name = names[0] || '';
+        if(!name){
+          showInfo('Select a file to download.', false);
+          return;
+        }
+        window.open('/api/log-files/download?file=' + encodeURIComponent(name), '_blank');
+        if(names.length > 1){
+          showInfo('Multiple selected. Download started for first selected file: ' + name, true);
+        } else {
+          showInfo('Download started for: ' + name, true);
+        }
+      });
+
+      document.getElementById('loadTradeDetails').addEventListener('click', async () => {
+        await loadTradeDetailsFromSelectedLog();
+      });
+
+      document.getElementById('logout').addEventListener('click', async () => {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/logout';
+        document.body.appendChild(form);
+        form.submit();
+      });
+
+      window.onload = async () => {
+        try{
+          const today = new Date().toISOString().slice(0,10);
+          document.getElementById('date-v28').value = today;
+          document.getElementById('date-v30').value = today;
+        }catch(e){}
+        restoreModeSelection('v28');
+        restoreModeSelection('v30');
+        updateConsolidateButtonState();
+        await refreshAuto();
+        await loadLogFilesList();
+        await loadTradeDetailsFromSelectedLog();
+      };
+
+      function saveLog(logElementId, filename){
+        const pre = document.getElementById(logElementId);
+        const text = pre ? pre.textContent : '';
+        if(!text || text.trim() === '(no logs)' || text.trim() === '(no logs yet)'){
+          alert('No log content to save.');
+          return;
+        }
+        const blob = new Blob([text], {type: 'text/plain'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function nowStamp(){
+        const d = new Date();
+        const pad = n => String(n).padStart(2,'0');
+        return d.getFullYear() + pad(d.getMonth()+1) + pad(d.getDate()) +
+               '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+      }
+
+      document.getElementById('save-v28').addEventListener('click', () => {
+        const date = document.getElementById('date-v28').value || new Date().toISOString().slice(0,10);
+        saveLog('logs-v28', 'v28_log_' + date + '_' + nowStamp() + '.txt');
+      });
+
+      document.getElementById('save-v30').addEventListener('click', () => {
+        const date = document.getElementById('date-v30').value || new Date().toISOString().slice(0,10);
+        saveLog('logs-v30', 'v30_log_' + date + '_' + nowStamp() + '.txt');
+      });
+
+      document.getElementById('save-live-order-only').addEventListener('click', () => {
+        saveLog('logs-live-order-only', 'live_order_log_' + nowStamp() + '.txt');
+      });
+
+      setInterval(refreshAuto, 3000);
+    </script>
+  </body>
+</html>
