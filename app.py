@@ -27,6 +27,19 @@ PID_FILE = os.path.join(WORKDIR, "strategy.pid")
 ENV_FILE = os.path.join(WORKDIR, ".env")
 IST = timezone(timedelta(hours=5, minutes=30))
 
+SUMMARY_MARKET_CONTEXT_FIELDS = [
+    "nifty_prev_close",
+    "nifty_open",
+    "nifty_high",
+    "nifty_high_time",
+    "nifty_low",
+    "nifty_low_time",
+    "nifty_close",
+    "nifty_change",
+    "gap_type",
+    "gap_points",
+]
+
 
 def ist_now_str() -> str:
     return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S") + " IST"
@@ -743,6 +756,366 @@ def to_float(value, default=0.0) -> float:
         return float(default)
 
 
+def _extract_trade_date_from_filename(safe_name: str) -> str:
+    """Extract YYYY-MM-DD from names like backtest_ddmmyyyy_*.xlsx."""
+    name = os.path.basename(str(safe_name or "")).strip().lower()
+    m = re.match(r"^(?:backtest|papertrade|livetrade)_(\d{8})(?:_|\.|$)", name)
+    if not m:
+        return ""
+    raw = m.group(1)
+    try:
+        return datetime.strptime(raw, "%d%m%Y").date().isoformat()
+    except Exception:
+        return ""
+
+
+def _read_trade_date_from_summary_sheet(path: str) -> str:
+    if pd is None:
+        return ""
+
+
+def _read_summary_market_context(path: str) -> dict:
+    out = {k: "" for k in SUMMARY_MARKET_CONTEXT_FIELDS}
+    if pd is None:
+        return out
+    try:
+        df = pd.read_excel(path, sheet_name="summary")
+    except Exception:
+        return out
+    if df is None or df.empty:
+        return out
+
+    cols = [str(c).strip().lower() for c in df.columns]
+    metric_col = None
+    value_col = None
+    for idx, col in enumerate(cols):
+        if col == "metric":
+            metric_col = df.columns[idx]
+        if col == "value":
+            value_col = df.columns[idx]
+    if metric_col is None or value_col is None:
+        return out
+
+    try:
+        metric_map = {}
+        for _, row in df.iterrows():
+            key = str(row.get(metric_col) or "").strip().lower()
+            if not key:
+                continue
+            metric_map[key] = normalize_json_value(row.get(value_col))
+        for key in SUMMARY_MARKET_CONTEXT_FIELDS:
+            val = metric_map.get(key.lower(), "")
+            out[key] = "" if val is None else val
+    except Exception:
+        pass
+    return out
+
+
+def _merge_market_context(contexts: list[dict]) -> dict:
+    merged = {k: "" for k in SUMMARY_MARKET_CONTEXT_FIELDS}
+    if not contexts:
+        return merged
+
+    for key in SUMMARY_MARKET_CONTEXT_FIELDS:
+        values = []
+        for ctx in contexts:
+            val = "" if ctx is None else ctx.get(key, "")
+            sval = "" if val is None else str(val).strip()
+            if sval:
+                values.append((sval, val))
+        if not values:
+            merged[key] = ""
+            continue
+        unique = {v[0] for v in values}
+        if len(unique) == 1:
+            merged[key] = values[-1][1]
+        else:
+            merged[key] = "MULTIPLE"
+    return merged
+    try:
+        df = pd.read_excel(path, sheet_name="summary")
+    except Exception:
+        return ""
+    if df is None or df.empty:
+        return ""
+
+    cols = [str(c).strip().lower() for c in df.columns]
+    metric_col = None
+    value_col = None
+    for idx, col in enumerate(cols):
+        if col == "metric":
+            metric_col = df.columns[idx]
+        if col == "value":
+            value_col = df.columns[idx]
+    if metric_col is None or value_col is None:
+        return ""
+
+    try:
+        row = df[df[metric_col].astype(str).str.strip().str.lower() == "trade_date"].head(1)
+        if row.empty:
+            return ""
+        raw = str(row.iloc[0][value_col]).strip()
+        if not raw:
+            return ""
+        return datetime.fromisoformat(raw).date().isoformat()
+    except Exception:
+        return ""
+
+
+def _build_kite_client_from_env() -> tuple[object, str]:
+    if KiteConnect is None:
+        return None, "kiteconnect_not_installed"
+    api_key = str(os.environ.get("API_KEY", "")).strip()
+    access_token = str(os.environ.get("ACCESS_TOKEN", "")).strip()
+    if not api_key:
+        return None, "missing_api_key"
+    if not access_token:
+        return None, "missing_access_token"
+    try:
+        kite = KiteConnect(api_key=api_key)
+        kite.set_access_token(access_token)
+        return kite, ""
+    except Exception as exc:
+        return None, f"kite_init_failed:{exc}"
+
+
+def _fetch_gap_from_broker_for_date(kite, trade_date: str, token: int) -> tuple[dict, str]:
+    trade_date = str(trade_date or "").strip()
+    if not trade_date:
+        return {}, "trade_date_unavailable"
+
+    try:
+        target_date = datetime.fromisoformat(trade_date).date()
+    except Exception:
+        return {}, "invalid_trade_date"
+
+    def _fetch_day_rows(day_date):
+        from_ts = datetime.combine(day_date, datetime.min.time()).replace(hour=9, minute=15)
+        to_ts = datetime.combine(day_date, datetime.min.time()).replace(hour=15, minute=30)
+        return kite.historical_data(token, from_ts, to_ts, "minute", continuous=False, oi=False) or []
+
+    try:
+        rows_today = _fetch_day_rows(target_date)
+    except Exception as exc:
+        return {}, f"day_history_failed:{exc}"
+
+    if not rows_today:
+        return {}, "no_day_history"
+
+    today_open = to_float(rows_today[0].get("open"), 0.0)
+    if today_open <= 0:
+        return {}, "invalid_today_open"
+    today_high = 0.0
+    today_low = 0.0
+    today_close = 0.0
+    today_high_time = ""
+    today_low_time = ""
+
+    def _fmt_ist_time(raw_dt) -> str:
+        if raw_dt in (None, ""):
+            return ""
+        try:
+            ts = pd.Timestamp(raw_dt) if pd is not None else raw_dt
+            if hasattr(ts, "to_pydatetime"):
+                ts = ts.to_pydatetime()
+            if getattr(ts, "tzinfo", None) is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.astimezone(IST)
+            return ts.strftime("%H:%M")
+        except Exception:
+            return ""
+
+    try:
+        highs = [to_float(r.get("high"), 0.0) for r in rows_today]
+        lows = [to_float(r.get("low"), 0.0) for r in rows_today if to_float(r.get("low"), 0.0) > 0]
+        today_high = max(highs) if highs else 0.0
+        today_low = min(lows) if lows else 0.0
+        # pick last available non-zero close (some historical endpoints may include
+        # trailing empty/zero rows) instead of blindly using the final element
+        today_close = 0.0
+        for r in reversed(rows_today):
+            c = to_float(r.get("close"), 0.0)
+            if c and c > 0:
+                today_close = c
+                break
+
+        if today_high > 0:
+            for r in rows_today:
+                if to_float(r.get("high"), 0.0) == today_high:
+                    today_high_time = _fmt_ist_time(r.get("date"))
+                    break
+
+        if today_low > 0:
+            for r in rows_today:
+                if to_float(r.get("low"), 0.0) == today_low:
+                    today_low_time = _fmt_ist_time(r.get("date"))
+                    break
+    except Exception:
+        today_high = 0.0
+        today_low = 0.0
+        today_close = 0.0
+        today_high_time = ""
+        today_low_time = ""
+
+    prev_close = 0.0
+    prev_high = 0.0
+    prev_low = 0.0
+    prev_trade_date = ""
+    prev_date = target_date - timedelta(days=1)
+    for _ in range(10):
+        if prev_date.weekday() < 5:
+            try:
+                rows_prev = _fetch_day_rows(prev_date)
+            except Exception:
+                rows_prev = []
+            if rows_prev:
+                prev_close = to_float(rows_prev[-1].get("close"), 0.0)
+                if prev_close > 0:
+                    try:
+                        prev_high = max(to_float(r.get("high"), 0.0) for r in rows_prev)
+                        lows = [to_float(r.get("low"), 0.0) for r in rows_prev if to_float(r.get("low"), 0.0) > 0]
+                        prev_low = min(lows) if lows else 0.0
+                    except Exception:
+                        prev_high = 0.0
+                        prev_low = 0.0
+                    prev_trade_date = prev_date.isoformat()
+                    break
+        prev_date -= timedelta(days=1)
+
+    if prev_close <= 0:
+        return {}, "prev_close_unavailable"
+
+    gap_points = round(today_open - prev_close, 2)
+    gap_pct = round((gap_points / prev_close) * 100.0, 2)
+    gap_type = "FLAT"
+    if gap_points > 0:
+        gap_type = "GAP_UP"
+    elif gap_points < 0:
+        gap_type = "GAP_DOWN"
+
+    nifty_change = ""
+    if prev_close > 0 and today_close > 0:
+        chg_pts = today_close - prev_close
+        chg_pct = (chg_pts / prev_close) * 100.0
+        sign = "+" if chg_pts >= 0 else ""
+        nifty_change = f"{sign}{chg_pts:.0f} pts ({sign}{chg_pct:.2f}%)"
+
+    cpr_pivot = ""
+    cpr_bc = ""
+    cpr_tc = ""
+    cpr_width = ""
+    cpr_width_pct = ""
+    cpr_type = ""
+    if prev_high > 0 and prev_low > 0 and prev_close > 0:
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        bc = (prev_high + prev_low) / 2.0
+        tc = (2.0 * pivot) - bc
+        if bc > tc:
+            bc, tc = tc, bc
+        width = tc - bc
+        width_pct = ((width / pivot) * 100.0) if pivot else 0.0
+        if width_pct < 0.30:
+            cpr_type = "NARROW"
+        elif width_pct < 0.70:
+            cpr_type = "MODERATE"
+        else:
+            cpr_type = "WIDE"
+        cpr_pivot = int(round(pivot))
+        cpr_bc = int(round(bc))
+        cpr_tc = int(round(tc))
+        cpr_width = round(width, 2)
+        cpr_width_pct = round(width_pct, 2)
+
+    return {
+        "trade_date": target_date.isoformat(),
+        "prev_trade_date": prev_trade_date,
+        "nifty_prev_close": int(round(prev_close)) if prev_close > 0 else "",
+        "nifty_open": int(round(today_open)) if today_open > 0 else "",
+        "nifty_high": int(round(today_high)) if today_high > 0 else "",
+        "nifty_high_time": today_high_time,
+        "nifty_low": int(round(today_low)) if today_low > 0 else "",
+        "nifty_low_time": today_low_time,
+        "nifty_close": int(round(today_close)) if today_close > 0 else "",
+        "nifty_change": nifty_change,
+        "today_open": round(today_open, 2),
+        "prev_close": round(prev_close, 2),
+        "gap_type": gap_type,
+        "gap_points": gap_points,
+        "gap_pct": gap_pct,
+        "is_gap_up": bool(gap_points > 0),
+        "cpr_pivot": cpr_pivot,
+        "cpr_bc": cpr_bc,
+        "cpr_tc": cpr_tc,
+        "cpr_width": cpr_width,
+        "cpr_width_pct": cpr_width_pct,
+        "cpr_type": cpr_type,
+    }, ""
+
+
+def _write_gap_to_summary_sheet(path: str, gap: dict) -> tuple[bool, str]:
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        return False, "openpyxl_not_installed"
+
+    try:
+        wb = load_workbook(path)
+    except Exception as exc:
+        return False, f"open_workbook_failed:{exc}"
+
+    ws = wb["summary"] if "summary" in wb.sheetnames else wb.create_sheet("summary")
+
+    if ws.max_row < 1:
+        ws.cell(row=1, column=1, value="metric")
+        ws.cell(row=1, column=2, value="value")
+
+    header_metric = str(ws.cell(row=1, column=1).value or "").strip().lower()
+    header_value = str(ws.cell(row=1, column=2).value or "").strip().lower()
+    if header_metric != "metric":
+        ws.cell(row=1, column=1, value="metric")
+    if header_value != "value":
+        ws.cell(row=1, column=2, value="value")
+
+    metric_rows = {}
+    for r in range(2, ws.max_row + 1):
+        key = str(ws.cell(row=r, column=1).value or "").strip()
+        if key:
+            metric_rows[key.lower()] = r
+
+    updates = {
+        "nifty_prev_close": gap.get("nifty_prev_close"),
+        "nifty_open": gap.get("nifty_open"),
+        "nifty_high": gap.get("nifty_high"),
+        "nifty_high_time": gap.get("nifty_high_time"),
+        "nifty_low": gap.get("nifty_low"),
+        "nifty_low_time": gap.get("nifty_low_time"),
+        "nifty_close": gap.get("nifty_close"),
+        "nifty_change": gap.get("nifty_change"),
+        "gap_type": gap.get("gap_type"),
+        "gap_points": gap.get("gap_points"),
+        "is_gap_up": gap.get("is_gap_up"),
+        "gap_prev_trade_date": gap.get("prev_trade_date"),
+        "gap_data_source": "broker_history",
+        "gap_updated_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S") + " IST",
+    }
+
+    next_row = ws.max_row + 1
+    for key, value in updates.items():
+        row_idx = metric_rows.get(key.lower())
+        if row_idx is None:
+            row_idx = next_row
+            next_row += 1
+            ws.cell(row=row_idx, column=1, value=key)
+            metric_rows[key.lower()] = row_idx
+        ws.cell(row=row_idx, column=2, value=value)
+
+    try:
+        wb.save(path)
+    except Exception as exc:
+        return False, f"save_failed:{exc}"
+    return True, ""
+
+
 @app.route("/api/logs")
 def api_logs():
     name = request.args.get('name')
@@ -992,7 +1365,7 @@ def parse_trade_details_from_xlsx(safe_name: str, row_limit: int = 200) -> tuple
     preferred_cols = [
         'entry_time', 'exit_time', 'side', 'option_symbol',
         'entry_spot', 'signal_spot_price', 'exit_spot',
-        'entry_price', 'exit_price', 'pnl_points', 'pnl_rs', 'exit_reason'
+        'entry_price', 'high_during_trade', 'exit_price', 'pnl_points', 'pnl_rs', 'exit_reason'
     ]
     available_cols = [c for c in preferred_cols if c in cols_map]
     selected_cols = [cols_map[c] for c in available_cols]
@@ -1018,6 +1391,7 @@ def parse_trade_details_from_xlsx(safe_name: str, row_limit: int = 200) -> tuple
         },
         "columns": available_cols,
         "rows": rows,
+        "market_context": _read_summary_market_context(path),
     }
     return payload, None
 
@@ -1074,29 +1448,43 @@ def api_log_files_trade_details_consolidated():
     loss_or_flat = 0
     all_rows = []
     file_reports = []
+    market_context_list = []
 
     for safe_name in selected:
         try:
             payload, err = parse_trade_details_from_xlsx(safe_name, row_limit=200)
             if err:
-                file_reports.append({"file": safe_name, "ok": False, "msg": err})
+                file_reports.append({
+                    "file": safe_name,
+                    "ok": False,
+                    "msg": err,
+                    "market_context": {k: "" for k in SUMMARY_MARKET_CONTEXT_FIELDS},
+                })
                 continue
 
             summary = payload.get('summary') or {}
+            market_context = payload.get('market_context') or {k: "" for k in SUMMARY_MARKET_CONTEXT_FIELDS}
             total_rows += int(payload.get('total_rows') or 0)
             total_pnl_rs += to_float(summary.get('total_pnl_rs'), 0.0)
             total_pnl_points += to_float(summary.get('total_pnl_points'), 0.0)
             win_trades += int(summary.get('win_trades') or 0)
             loss_or_flat += int(summary.get('loss_or_flat_trades') or 0)
             all_rows.extend(payload.get('rows') or [])
+            market_context_list.append(market_context)
             file_reports.append({
                 "file": safe_name,
                 "ok": True,
                 "sheet": payload.get('sheet', ''),
                 "total_rows": int(payload.get('total_rows') or 0),
+                "market_context": market_context,
             })
         except Exception as e:
-            file_reports.append({"file": safe_name, "ok": False, "msg": str(e)})
+            file_reports.append({
+                "file": safe_name,
+                "ok": False,
+                "msg": str(e),
+                "market_context": {k: "" for k in SUMMARY_MARKET_CONTEXT_FIELDS},
+            })
 
     if all_rows:
         try:
@@ -1115,7 +1503,77 @@ def api_log_files_trade_details_consolidated():
             "win_trades": win_trades,
             "loss_or_flat_trades": loss_or_flat,
         },
+        "market_context": _merge_market_context(market_context_list),
         "rows": all_rows[-600:],
+    })
+
+
+@app.route('/api/log-files/update-gap-summary', methods=['POST'])
+def api_log_files_update_gap_summary():
+    if not session.get("logged_in"):
+        return jsonify({"ok": False, "msg": "Unauthorized"}), 401
+
+    data = request.get_json() or {}
+    files = data.get("files")
+    if not isinstance(files, list) or not files:
+        return jsonify({"ok": False, "msg": "Provide files as a non-empty list"}), 400
+
+    kite, kite_err = _build_kite_client_from_env()
+    if kite is None:
+        return jsonify({"ok": False, "msg": f"Cannot fetch broker gap data: {kite_err}"}), 400
+
+    token = int(to_float(os.environ.get("BROKER_GAP_UNDERLYING_TOKEN", "256265"), 256265))
+
+    selected = []
+    for raw in files:
+        safe_name = os.path.basename(str(raw or "").strip())
+        if safe_name and safe_name.lower().endswith(".xlsx") and safe_name == str(raw or "").strip():
+            if safe_name not in selected:
+                selected.append(safe_name)
+
+    if not selected:
+        return jsonify({"ok": False, "msg": "No valid .xlsx files selected"}), 400
+
+    reports = []
+    updated = 0
+
+    for safe_name in selected:
+        path = os.path.join(LOGS_DIR, safe_name)
+        if not os.path.isfile(path):
+            reports.append({"file": safe_name, "ok": False, "msg": "file_not_found"})
+            continue
+
+        trade_date = _extract_trade_date_from_filename(safe_name)
+        if not trade_date:
+            trade_date = _read_trade_date_from_summary_sheet(path)
+        if not trade_date:
+            reports.append({"file": safe_name, "ok": False, "msg": "trade_date_not_found_in_filename_or_summary"})
+            continue
+
+        gap, gap_err = _fetch_gap_from_broker_for_date(kite, trade_date, token)
+        if not gap:
+            reports.append({"file": safe_name, "ok": False, "msg": gap_err or "gap_fetch_failed", "trade_date": trade_date})
+            continue
+
+        ok, write_err = _write_gap_to_summary_sheet(path, gap)
+        if not ok:
+            reports.append({"file": safe_name, "ok": False, "msg": write_err or "write_failed", "trade_date": trade_date})
+            continue
+
+        updated += 1
+        reports.append({
+            "file": safe_name,
+            "ok": True,
+            "trade_date": trade_date,
+            "gap_type": gap.get("gap_type"),
+            "gap_points": gap.get("gap_points"),
+        })
+
+    return jsonify({
+        "ok": updated > 0,
+        "updated": updated,
+        "total": len(selected),
+        "reports": reports,
     })
 
 

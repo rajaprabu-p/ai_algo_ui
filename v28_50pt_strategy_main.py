@@ -99,6 +99,8 @@ AUTO_SELECT_EXPIRY = ""      # e.g. "2026-03-24"; keep blank for nearest availab
 AUTO_SELECT_STRIKE_STEP = 50
 AUTO_SELECT_SPOT_REF = "09:15"  # Use 09:15 candle close for backtest ATM selection (matches live market open; avoids live-quote fallback drift)
 AUTO_SELECT_REFRESH_INTERVAL_MINUTES = 2  # In PAPERTRADE_LIVE/LIVE_ORDER, re-select ATM symbols every N minutes when no trade is running
+AUTO_SELECT_STRIKE_SWITCH_BUFFER_POINTS = 12.5  # Require this many points beyond strike midpoint before switching strikes
+AUTO_SELECT_MIN_SWITCH_INTERVAL_SECONDS = 45    # Minimum gap between strike switches in live modes
 
 # Execution mode
 RUN_MODE = _cli_args.mode if _cli_args.mode else "PAPERTRADE_LIVE"       # BACKTEST, PAPERTRADE_LIVE, or LIVE_ORDER
@@ -181,7 +183,7 @@ LIVE_ORDER_ORDER_TYPE = "MARKET"
 ENABLE_MARKET_PROTECTION = True
 LIVE_ORDER_MARKET_PROTECTION = -1  # 0=no protection, 1-100=custom %, -1=automatic protection by Kite
 LIVE_ORDER_TRIGGER_PRICE_BUFFER = 0.05  # trigger buffer for broker-side emergency SL order
-LIVE_ORDER_TAG = "MTF_LIVE"
+LIVE_ORDER_TAG = "RP_ALGO"
 ENABLE_MARKET_TO_LIMIT_FALLBACK = True
 MARKET_TO_LIMIT_BUFFER_PCT = 0.5
 OPTION_TICK_SIZE = 0.05
@@ -292,7 +294,7 @@ def safe_float(value, default: float = 0.0) -> float:
         return float(default)
 
 
-def get_trailing_stop_for_profit(entry_price: float, pnl_points: float, current_stop: float) -> float:
+def get_trailing_stop_for_profit(entry_price: float, pnl_points: float, current_stop: float, current_time=None, stage1_triggered: bool = False) -> float:
     trailing_stop = current_stop
     for profit_target, stop_profit in TRAILING_PROFIT_STAGES:
         if pnl_points >= float(profit_target):
@@ -300,7 +302,7 @@ def get_trailing_stop_for_profit(entry_price: float, pnl_points: float, current_
     return trailing_stop
 
 
-def get_trailing_profit_status(pnl_points: float) -> str:
+def get_trailing_profit_status(pnl_points: float, current_time=None, stage1_triggered: bool = False) -> str:
     triggered = []
     for idx, (profit_target, stop_profit) in enumerate(TRAILING_PROFIT_STAGES, start=1):
         if pnl_points >= float(profit_target):
@@ -1602,7 +1604,12 @@ def to_excel_safe_df(rows: List[Dict]) -> pd.DataFrame:
     return df
 
 
-def build_papertrade_summary_df(live_trade_events: List[Dict], guard_stop_reason: str = "", run_mode: str = "PAPERTRADE_LIVE") -> pd.DataFrame:
+def build_papertrade_summary_df(
+    live_trade_events: List[Dict],
+    guard_stop_reason: str = "",
+    run_mode: str = "PAPERTRADE_LIVE",
+    market_context: Optional[Dict] = None,
+) -> pd.DataFrame:
     trades_df = to_excel_safe_df(live_trade_events)
 
     total_trades = 0
@@ -1627,18 +1634,30 @@ def build_papertrade_summary_df(live_trade_events: List[Dict], guard_stop_reason
     if live_trade_events:
         latest_context = dict(live_trade_events[-1])
 
+    fallback_context = market_context or {}
+
+    def context_value(key: str):
+        val = latest_context.get(key, "")
+        try:
+            if val == "" or pd.isna(val):
+                return fallback_context.get(key, "")
+        except Exception:
+            if val == "":
+                return fallback_context.get(key, "")
+        return val
+
     summary_rows = [
         {"metric": "run_mode", "value": str(run_mode)},
         {"metric": "script_name", "value": get_running_script_name()},
-        {"metric": "gap_type", "value": latest_context.get("gap_type", "")},
-        {"metric": "gap_points", "value": latest_context.get("gap_points", "")},
-        {"metric": "gap_pct", "value": latest_context.get("gap_pct", "")},
-        {"metric": "cpr_pivot", "value": latest_context.get("cpr_pivot", "")},
-        {"metric": "cpr_bc", "value": latest_context.get("cpr_bc", "")},
-        {"metric": "cpr_tc", "value": latest_context.get("cpr_tc", "")},
-        {"metric": "cpr_width", "value": latest_context.get("cpr_width", "")},
-        {"metric": "cpr_width_pct", "value": latest_context.get("cpr_width_pct", "")},
-        {"metric": "cpr_type", "value": latest_context.get("cpr_type", "")},
+        {"metric": "gap_type", "value": context_value("gap_type")},
+        {"metric": "gap_points", "value": context_value("gap_points")},
+        {"metric": "gap_pct", "value": context_value("gap_pct")},
+        {"metric": "cpr_pivot", "value": context_value("cpr_pivot")},
+        {"metric": "cpr_bc", "value": context_value("cpr_bc")},
+        {"metric": "cpr_tc", "value": context_value("cpr_tc")},
+        {"metric": "cpr_width", "value": context_value("cpr_width")},
+        {"metric": "cpr_width_pct", "value": context_value("cpr_width_pct")},
+        {"metric": "cpr_type", "value": context_value("cpr_type")},
         {"metric": "papertrade_fresh_count_on_restart", "value": str(PAPERTRADE_FRESH_COUNT_ON_RESTART)},
         {"metric": "mtm_guard_enabled", "value": str(ENABLE_MTM_GUARD)},
         {"metric": "trade_stop_basis", "value": "MTM_ONLY" if ENABLE_MTM_GUARD else "MTM_AND_MAX_TRADES"},
@@ -1745,6 +1764,15 @@ def build_backtest_summary_df(trades: pd.DataFrame, run_mode: str, day: pd.DataF
 
 
 def export_papertrade_events_to_excel(trade_date: str, ce_symbol: str, pe_symbol: str, live_events: List[Dict], live_trade_events: List[Dict], guard_stop_reason: str = "", execution_mode: str = "PAPERTRADE_LIVE", reuse_path: str = None, debug_day: Optional[pd.DataFrame] = None) -> str:
+    def normalize_export_timestamp(value):
+        try:
+            timestamp = pd.Timestamp(value)
+            if timestamp.tzinfo is not None:
+                timestamp = timestamp.tz_convert(IST).tz_localize(None)
+            return timestamp.to_pydatetime().replace(microsecond=0)
+        except Exception:
+            return value
+
     if reuse_path:
         excel_file = reuse_path
     else:
@@ -1759,7 +1787,12 @@ def export_papertrade_events_to_excel(trade_date: str, ce_symbol: str, pe_symbol
     if not trades_df.empty and "entry_time" in trades_df.columns:
         trades_df = trades_df.sort_values("entry_time").reset_index(drop=True)
 
-    # Align trade `entry_time` with actual BUY event times when available.
+    for frame in (events_df, trades_df):
+        for timestamp_column in ("event_time", "entry_time", "exit_time", "signal_time"):
+            if timestamp_column in frame.columns:
+                frame[timestamp_column] = frame[timestamp_column].map(normalize_export_timestamp)
+
+    # Align trade `entry_time`/`signal_time` with actual BUY event times when available.
     try:
         if not events_df.empty and not trades_df.empty and "option_symbol" in events_df.columns and "option_symbol" in trades_df.columns:
             buy_events = events_df[events_df.get("event_type", "").astype(str).str.upper() == "BUY"][["option_symbol", "event_time"]].copy()
@@ -1769,12 +1802,15 @@ def export_papertrade_events_to_excel(trade_date: str, ce_symbol: str, pe_symbol
                 sym = str(r.get("option_symbol") or "")
                 buy_queues.setdefault(sym, []).append(r.get("event_time"))
 
-            # Replace trades_df.entry_time with the first unused buy event time for the same symbol
+            # Replace trades_df.entry_time with the first unused buy event time for the same symbol.
+            # Keep signal_time in sync so exported rows do not show stale pre-fill timestamps.
             for idx, row in trades_df.iterrows():
                 sym = str(row.get("option_symbol") or "")
                 if sym in buy_queues and buy_queues[sym]:
                     candidate = buy_queues[sym].pop(0)
                     trades_df.at[idx, "entry_time"] = candidate
+                    if "signal_time" in trades_df.columns:
+                        trades_df.at[idx, "signal_time"] = candidate
     except Exception:
         pass
 
@@ -1791,7 +1827,21 @@ def export_papertrade_events_to_excel(trade_date: str, ce_symbol: str, pe_symbol
                     except Exception:
                         pass
 
-    summary_df = build_papertrade_summary_df(live_trade_events, guard_stop_reason, execution_mode)
+    summary_market_context: Dict[str, object] = {}
+    try:
+        if debug_day is not None and hasattr(debug_day, "attrs"):
+            for key in ["gap_type", "gap_points", "gap_pct", "cpr_pivot", "cpr_bc", "cpr_tc", "cpr_width", "cpr_width_pct", "cpr_type"]:
+                if key in debug_day.attrs:
+                    summary_market_context[key] = debug_day.attrs.get(key, "")
+    except Exception:
+        summary_market_context = {}
+
+    summary_df = build_papertrade_summary_df(
+        live_trade_events,
+        guard_stop_reason,
+        execution_mode,
+        market_context=summary_market_context,
+    )
 
     with pd.ExcelWriter(excel_file, engine="openpyxl") as writer:
         summary_df.to_excel(writer, sheet_name="summary", index=False)
@@ -2180,6 +2230,8 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
         "last_tick_reconnect_attempt_ts": None,
         "ws_reconnect_requested": False,
         "last_symbol_refresh_ts": None,
+        "last_symbol_switch_ts": None,
+        "last_entry_block_reason": "",
         "locked_trade_strike_active": False,
         "locked_ce_symbol": "",
         "locked_pe_symbol": "",
@@ -2234,15 +2286,197 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
 
     token_to_key = {UNDERLYING_TOKEN: "spot", ce_token: "ce", pe_token: "pe"}
 
+    def adopt_open_live_positions_from_broker() -> None:
+        if execution_mode != "LIVE_ORDER":
+            return
+        try:
+            positions_payload = kite.positions() or {}
+        except Exception as exc:
+            print(f"[LIVE ADOPT WARNING] Unable to fetch broker positions on startup: {exc}")
+            return
+
+        net_rows = positions_payload.get("net") or []
+        if not isinstance(net_rows, list):
+            net_rows = []
+
+        symbol_rows: Dict[str, Dict] = {}
+        for row in net_rows:
+            try:
+                qty = safe_int(row.get("quantity") or row.get("net_quantity") or 0, 0)
+                symbol = str(row.get("tradingsymbol") or "").strip().upper()
+                exchange = str(row.get("exchange") or "").strip().upper()
+                product = str(row.get("product") or "").strip().upper()
+                if qty <= 0:
+                    continue
+                if exchange != str(OPTION_EXCHANGE).upper() or product != str(LIVE_ORDER_PRODUCT).upper():
+                    continue
+                if not (symbol.endswith("CE") or symbol.endswith("PE")):
+                    continue
+                symbol_rows[symbol] = row
+            except Exception:
+                continue
+
+        if not symbol_rows:
+            return
+
+        try:
+            orders_cache = kite.orders() or []
+        except Exception:
+            orders_cache = []
+
+        adopted_count = 0
+        for symbol, row in symbol_rows.items():
+            side = "CE" if symbol.endswith("CE") else "PE"
+            qty = safe_int(row.get("quantity") or row.get("net_quantity") or 0, 0)
+            entry_price = safe_float(
+                row.get("average_price") or row.get("buy_price") or row.get("last_price") or 0.0,
+                0.0,
+            )
+
+            entry_order_id = ""
+            entry_time = None
+            for order in reversed(orders_cache):
+                if str(order.get("tradingsymbol") or "").strip().upper() != symbol:
+                    continue
+                if str(order.get("transaction_type") or "").strip().upper() != "BUY":
+                    continue
+                if normalize_order_status(order.get("status")) != "COMPLETE":
+                    continue
+                filled_qty = safe_int(order.get("filled_quantity") or order.get("quantity") or 0, 0)
+                if filled_qty <= 0:
+                    continue
+                entry_order_id = str(order.get("order_id") or "")
+                entry_time = extract_order_time(order)
+                avg_from_order = extract_avg_price(order)
+                if avg_from_order > 0:
+                    entry_price = avg_from_order
+                break
+
+            if entry_time is None:
+                entry_time = datetime.now(IST)
+
+            entry_reason = "ADOPTED_RESTART_OPEN_POSITION"
+            event_id = f"{side}|{entry_time}|{entry_reason}"
+            if event_id in live_state["broker_positions"]:
+                continue
+
+            spot_now = get_spot_ltp_from_live_state(live_state)
+            if spot_now <= 0:
+                try:
+                    spot_now = get_spot_ltp(kite, UNDERLYING_NAME)
+                except Exception:
+                    spot_now = 0.0
+
+            adopted_entry = {
+                "side": side,
+                "option_symbol": symbol,
+                "qty": qty,
+                "entry_reason": entry_reason,
+                "entry_time": entry_time,
+                "entry_spot": spot_now,
+                "signal_time": entry_time,
+                "signal_spot_price": spot_now,
+                "signal_option_price": entry_price,
+                "entry_price_theoretical": entry_price,
+                "entry_price_actual": entry_price,
+                "mtf_entry_label": "ADOPTED",
+                "emergency_sl_pct_used": safe_float(FIXED_SL_POINTS, 50.0),
+                "emergency_sl_price": np.nan,
+                "emergency_sl_trigger_price": np.nan,
+                "emergency_sl_order_id": "",
+                "entry_order_id": entry_order_id,
+                "entry_order_status": "COMPLETE" if entry_order_id else "ADOPTED",
+                "entry_broker_time": entry_time,
+                "entry_order_message": "adopted on restart",
+                "exit_in_progress": False,
+                "best_price": entry_price,
+                "trailing_stop_price": 0.0,
+                "target_profit_points": float(TRAILING_PROFIT_STAGES[0][0]) if TRAILING_PROFIT_STAGES else 50.0,
+                "broker_open_qty": qty,
+                "manual_or_broker_exit_detected": False,
+            }
+            live_state["broker_positions"][event_id] = adopted_entry
+            adopted_count += 1
+
+            token_value = safe_int(row.get("instrument_token") or row.get("instrumentToken") or 0, 0)
+            if side == "CE":
+                old_ce_token = safe_int(live_state.get("current_ce_token"), 0)
+                live_state["current_ce_symbol"] = symbol
+                if token_value > 0:
+                    live_state["current_ce_token"] = token_value
+                    if old_ce_token > 0:
+                        token_to_key.pop(old_ce_token, None)
+                    token_to_key[token_value] = "ce"
+            else:
+                old_pe_token = safe_int(live_state.get("current_pe_token"), 0)
+                live_state["current_pe_symbol"] = symbol
+                if token_value > 0:
+                    live_state["current_pe_token"] = token_value
+                    if old_pe_token > 0:
+                        token_to_key.pop(old_pe_token, None)
+                    token_to_key[token_value] = "pe"
+
+            print(
+                f"[LIVE ADOPT] Adopted open broker position: side={side} symbol={symbol} qty={qty} "
+                f"entry={entry_price:.2f} entry_time={entry_time}"
+            )
+
+        if adopted_count > 0:
+            live_state["max_trades_block_logged"] = False
+            print(f"[LIVE ADOPT] Total adopted open positions: {adopted_count}")
+
+    def normalize_exit_reason(reason: str, default: str = "STRATEGY_EXIT") -> str:
+        text = str(reason or "").strip()
+        if text.startswith("#sym:"):
+            text = text[5:]
+        return text or default
+
+    def get_new_entry_block_reason() -> str:
+        now_local = datetime.now(IST)
+        if live_state.get("force_exit_triggered") or now_local >= force_exit_ts:
+            return "FORCE_EXIT_WINDOW"
+        if now_local >= no_new_entry_after_live_ts:
+            return "NO_NEW_ENTRY_AFTER"
+        if live_state.get("stop"):
+            return "SESSION_STOP"
+        return ""
+
+    def extract_option_strike(symbol: str) -> int:
+        s = str(symbol or "").upper()
+        if not (s.endswith("CE") or s.endswith("PE")):
+            return 0
+        num = ""
+        for ch in reversed(s[:-2]):
+            if ch.isdigit():
+                num = ch + num
+            elif num:
+                break
+        if not num:
+            return 0
+        try:
+            return int(num) % 100000
+        except Exception:
+            return 0
+
     def refresh_entry_symbols(reason: str = "POST_EXIT", forced_pair: Optional[tuple] = None) -> None:
         if not AUTO_SELECT_OPTION_SYMBOLS:
             return
+
+        def _symbol_refresh_log_context() -> str:
+            ts = live_state.get("last_tick_exchange_ts") or live_state.get("last_tick_ts") or datetime.now(IST)
+            ts_obj = pd.Timestamp(ts)
+            if hasattr(ts_obj, "to_pydatetime"):
+                ts_obj = ts_obj.to_pydatetime()
+            if ts_obj.tzinfo is None:
+                ts_obj = IST.localize(ts_obj)
+            ts_obj = ts_obj.astimezone(IST)
+            return f"tf={BASE_INTERVAL} at={ts_obj.strftime('%H:%M:%S')}"
 
         if live_state.get("locked_trade_strike_active") and forced_pair is None:
             skip_key = f"LOCKED:{reason}"
             if live_state.get("last_symbol_lock_skip_reason") != skip_key:
                 print(
-                    f"[SYMBOL REFRESH SKIPPED] reason={reason} "
+                    f"[SYMBOL REFRESH SKIPPED] reason={reason} {_symbol_refresh_log_context()} "
                     f"locked_strike CE={live_state.get('locked_ce_symbol')} "
                     f"PE={live_state.get('locked_pe_symbol')}"
                 )
@@ -2267,7 +2501,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     selection_time=selection_ts,
                 )
         except Exception as exc:
-            print(f"[SYMBOL REFRESH FAILED] reason={reason} error={exc}")
+            print(f"[SYMBOL REFRESH FAILED] reason={reason} {_symbol_refresh_log_context()} error={exc}")
             return
 
         old_ce_symbol = str(live_state.get("current_ce_symbol") or "")
@@ -2275,17 +2509,48 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
         old_ce_token = safe_int(live_state.get("current_ce_token"), 0)
         old_pe_token = safe_int(live_state.get("current_pe_token"), 0)
 
+        if forced_pair is None and old_ce_token > 0 and old_pe_token > 0:
+            changed = (old_ce_token != new_ce_token) or (old_pe_token != new_pe_token)
+            if changed and reason in {"PRE_ENTRY", "PERIODIC_NO_TRADE"}:
+                now_for_switch = datetime.now(IST)
+                min_switch_seconds = max(0, safe_int(AUTO_SELECT_MIN_SWITCH_INTERVAL_SECONDS, 45))
+                last_switch_ts = live_state.get("last_symbol_switch_ts")
+                if last_switch_ts is not None and min_switch_seconds > 0:
+                    elapsed = (now_for_switch - pd.Timestamp(last_switch_ts)).total_seconds()
+                    if elapsed < min_switch_seconds:
+                        print(
+                            f"[SYMBOL REFRESH SKIPPED] reason={reason} {_symbol_refresh_log_context()} debounce_active elapsed={elapsed:.1f}s "
+                            f"min_required={min_switch_seconds}s keeping CE={old_ce_symbol} PE={old_pe_symbol}"
+                        )
+                        return
+
+                old_strike = extract_option_strike(old_ce_symbol or old_pe_symbol)
+                new_strike = extract_option_strike(new_ce_symbol or new_pe_symbol)
+                step = max(1, safe_int(AUTO_SELECT_STRIKE_STEP, 50))
+                buffer_pts = max(1.0, safe_float(AUTO_SELECT_STRIKE_SWITCH_BUFFER_POINTS, 12.5))
+                if old_strike > 0 and new_strike > 0 and abs(new_strike - old_strike) == step and spot_ltp_now > 0:
+                    midpoint = (old_strike + new_strike) / 2.0
+                    direction = 1.0 if new_strike > old_strike else -1.0
+                    crossed = ((spot_ltp_now - midpoint) * direction) >= buffer_pts
+                    if not crossed:
+                        print(
+                            f"[SYMBOL REFRESH SKIPPED] reason={reason} {_symbol_refresh_log_context()} hysteresis spot={spot_ltp_now:.2f} "
+                            f"mid={midpoint:.2f} buffer={buffer_pts:.2f} keeping CE={old_ce_symbol} PE={old_pe_symbol}"
+                        )
+                        return
+
         # Commit new symbols immediately so subsequent rebuilds use them.
         live_state["current_ce_symbol"] = new_ce_symbol
         live_state["current_pe_symbol"] = new_pe_symbol
         live_state["current_ce_token"] = new_ce_token
         live_state["current_pe_token"] = new_pe_token
+        live_state["last_symbol_switch_ts"] = datetime.now(IST)
 
         if old_ce_token == new_ce_token and old_pe_token == new_pe_token:
             unchanged_key = f"{reason}:{new_ce_symbol}:{new_pe_symbol}"
             if live_state.get("last_symbol_refresh_unchanged_key") != unchanged_key:
                 print(
-                    f"[SYMBOL REFRESH] reason={reason} spot={spot_ltp_now:.2f} -> "
+                    f"[SYMBOL REFRESH] reason={reason} {_symbol_refresh_log_context()} spot={spot_ltp_now:.2f} -> "
                     f"CE={new_ce_symbol} ({new_ce_token}) PE={new_pe_symbol} ({new_pe_token}) [UNCHANGED]"
                 )
                 live_state["last_symbol_refresh_unchanged_key"] = unchanged_key
@@ -2329,7 +2594,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 print(f"[SYMBOL REFRESH WS WARNING] {exc}")
 
         print(
-            f"[SYMBOL REFRESH] reason={reason} spot={spot_ltp_now:.2f} "
+            f"[SYMBOL REFRESH] reason={reason} {_symbol_refresh_log_context()} spot={spot_ltp_now:.2f} "
             f"{old_ce_symbol}/{old_pe_symbol} -> {new_ce_symbol}/{new_pe_symbol}"
         )
 
@@ -2599,6 +2864,27 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
 
             open_pos = trades.attrs.get("open_position") if hasattr(trades, "attrs") else None
             if not open_pos:
+                # Fallback for temporary strategy-attr gaps during stall/rebuild windows.
+                # In paper mode we allow only one open position, so the latest BUY
+                # newer than latest SELL can be treated as currently open.
+                events = live_state.get("live_events") or []
+                last_buy = next((ev for ev in reversed(events) if str(ev.get("event_type") or "").upper() == "BUY"), None)
+                last_sell = next((ev for ev in reversed(events) if str(ev.get("event_type") or "").upper() == "SELL"), None)
+                if last_buy is not None:
+                    buy_ts = pd.Timestamp(last_buy.get("event_time")) if last_buy.get("event_time") is not None else None
+                    sell_ts = pd.Timestamp(last_sell.get("event_time")) if last_sell and last_sell.get("event_time") is not None else None
+                    if sell_ts is None or (buy_ts is not None and buy_ts > sell_ts):
+                        open_pos = {
+                            "side": str(last_buy.get("side") or ""),
+                            "option_symbol": str(last_buy.get("option_symbol") or ""),
+                            "entry_time": last_buy.get("event_time"),
+                            "entry_reason": str(last_buy.get("event_reason") or ""),
+                            "entry_price": safe_float(last_buy.get("option_price"), 0.0),
+                            "qty": safe_int(last_buy.get("qty"), QTY),
+                            "emergency_sl_price": safe_float(last_buy.get("emergency_sl_price"), np.nan),
+                        }
+
+            if not open_pos:
                 live_state["last_open_pnl_event_id"] = None
                 return
 
@@ -2609,10 +2895,6 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             if live_state.get("last_open_pnl_event_id") != open_event_id:
                 live_state["last_open_pnl_event_id"] = open_event_id
                 live_state["last_open_pnl_log_minute"] = None
-
-            current_option_price = get_option_ltp_from_live_state(live_state, side)
-            if current_option_price <= 0:
-                return
 
             entry_price = safe_float(open_pos.get("entry_price"), 0.0)
             for event in reversed(live_state.get("live_events") or []):
@@ -2629,12 +2911,29 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             if entry_price <= 0:
                 return
 
+            # Try live state LTP first, then broker quote by symbol, then fallback to entry
+            # so OPEN PNL lines are still emitted during sparse tick windows.
+            current_option_price = get_option_ltp_from_live_state(live_state, side)
+            if current_option_price <= 0:
+                option_symbol = str(open_pos.get("option_symbol") or "")
+                if option_symbol:
+                    try:
+                        current_option_price = get_option_symbol_ltp(kite, option_symbol)
+                    except Exception:
+                        current_option_price = 0.0
+            if current_option_price <= 0:
+                current_option_price = entry_price
+
             qty = safe_int(open_pos.get("qty"), QTY)
             unrealized_points = current_option_price - entry_price
             unrealized_rs = unrealized_points * qty
             realized_rs = safe_float(trades.attrs.get("realized_mtm_rs"), 0.0) if hasattr(trades, "attrs") else 0.0
             total_mtm_rs = realized_rs + unrealized_rs
-            trailing_status = get_trailing_profit_status(unrealized_points)
+            trailing_status = get_trailing_profit_status(
+                unrealized_points,
+                current_time=now_local,
+                stage1_triggered=safe_float(open_pos.get("trailing_stop_price"), 0.0) > safe_float(open_pos.get("emergency_sl_price"), 0.0),
+            )
             trailing_suffix = f" | trailing={trailing_status}" if trailing_status else ""
 
             print(
@@ -2648,6 +2947,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
 
     def print_execution_buy_summary(event_row: Dict) -> None:
         event_time = event_row.get("event_time")
+        logged_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S %Z")
         side_value = str(event_row.get("side") or "")
         symbol_value = str(event_row.get("option_symbol") or "")
         reason_value = str(event_row.get("event_reason") or "")
@@ -2658,7 +2958,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
         target_profit_points = safe_float(event_row.get("target_profit_points"), np.nan)
         target_suffix = f" target={target_profit_points:.2f}" if not np.isnan(target_profit_points) else ""
         print(
-            f"Entered position at {event_time} | mode={execution_mode} | side={side_value} symbol={symbol_value} "
+            f"Entered position at {event_time} | logged_at={logged_at} | mode={execution_mode} | side={side_value} symbol={symbol_value} "
             f"reason={reason_value} entry={option_price:.2f} spot={spot_price:.2f} qty={qty_value} "
             f"emergency_sl={emergency_sl:.2f}{target_suffix} trailing={str(event_row.get('trailing_status') or 'ladder_pending')}"
         )
@@ -2678,6 +2978,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
 
     def print_execution_sell_summary(event_row: Dict, trade_record: Optional[Dict] = None) -> None:
         event_time = event_row.get("event_time")
+        logged_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S %Z")
         side_value = str(event_row.get("side") or (trade_record or {}).get("side") or "")
         symbol_value = str(event_row.get("option_symbol") or (trade_record or {}).get("option_symbol") or "")
         reason_value = str(event_row.get("event_reason") or (trade_record or {}).get("exit_reason") or "")
@@ -2690,7 +2991,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
         target_suffix = f" target={target_profit_points:.2f}" if not np.isnan(target_profit_points) else ""
         trailing_status = str(event_row.get("trailing_status") or (trade_record or {}).get("trailing_status") or get_execution_trailing_status(event_row, trade_record))
         print(
-            f"Exited position at {event_time} with reason {reason_value}. "
+            f"Exited position at {event_time} | logged_at={logged_at} with reason {reason_value}. "
             f"symbol={symbol_value} side={side_value} entry={entry_price:.2f} exit={exit_price:.2f} "
             f"| P&L: {pnl_rs:.2f} Rs ({pnl_points:.2f} points). Cumulative MTM: {realized_mtm:.2f} Rs."
             f"{target_suffix} trailing={trailing_status}"
@@ -2801,6 +3102,10 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     option_ltp = get_option_symbol_ltp(kite, option_symbol)
 
                 if entry_price_actual > 0 and option_ltp > 0:
+                    prev_best_price = safe_float(synced.get("best_price"), entry_price_actual)
+                    if prev_best_price <= 0:
+                        prev_best_price = entry_price_actual
+                    synced["best_price"] = max(prev_best_price, option_ltp)
                     pnl_points_live = option_ltp - entry_price_actual
                     synced["live_pnl_points"] = pnl_points_live
                     current_stop = safe_float(synced.get("trailing_stop_price"), safe_float(synced.get("emergency_sl_price"), 0.0))
@@ -2813,7 +3118,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     _stage1_hit = safe_float(synced.get("trailing_stop_price"), 0.0) > safe_float(synced.get("emergency_sl_price"), 0.0)
                     min_trigger = None
                     try:
-                        active = get_active_trailing_stages(current_time=datetime.now(IST), stage1_triggered=_stage1_hit)
+                        active = TRAILING_PROFIT_STAGES
                         if active and len(active) > 0:
                             min_trigger = float(active[0][0])
                     except Exception:
@@ -2892,7 +3197,10 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             if not broker_entry.get("manual_or_broker_exit_detected"):
                 continue
 
-            exit_reason = str(broker_entry.get("broker_exit_reason") or "MANUAL_OR_EXTERNAL_EXIT")
+            exit_reason = normalize_exit_reason(
+                str(broker_entry.get("broker_exit_reason") or "MANUAL_OR_EXTERNAL_EXIT"),
+                default="MANUAL_OR_EXTERNAL_EXIT",
+            )
             trade_id = f"{event_id}|BROKER_EXIT|{exit_reason}"
             if trade_id in live_state["printed_trade_ids"]:
                 continue
@@ -2988,12 +3296,13 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             live_state["printed_trade_ids"].add(event_id)
             live_state["broker_positions"].pop(event_id, None)
 
-    def force_exit_live_order_positions(exit_reason: str = "#sym:FORCE_EXIT"):
+    def force_exit_live_order_positions(exit_reason: str = "FORCE_EXIT"):
         """Immediately flatten all tracked broker positions in LIVE_ORDER mode."""
         if execution_mode != "LIVE_ORDER":
             return
 
-        print(f"[FORCE EXIT ACTION] Flattening open LIVE_ORDER positions with reason={exit_reason}")
+        normalized_exit_reason = normalize_exit_reason(exit_reason, default="FORCE_EXIT")
+        print(f"[FORCE EXIT ACTION] Flattening open LIVE_ORDER positions with reason={normalized_exit_reason}")
 
         for event_id, broker_entry in list(live_state["broker_positions"].items()):
             try:
@@ -3034,7 +3343,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         "broker_exit_order_id": str(order_meta.get("exit_order_id") or ""),
                         "broker_exit_avg_price": extract_avg_price(exit_snapshot),
                         "broker_exit_time": extract_order_time(exit_snapshot),
-                        "broker_exit_reason": exit_reason,
+                        "broker_exit_reason": normalized_exit_reason,
                         "manual_or_broker_exit_detected": True,
                         "broker_open_qty": 0,
                         "exit_in_progress": False,
@@ -3061,11 +3370,12 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 get_open_local_position_count(live_state) == 0
                 and live_state.get("active_order_event_id") is None
             )
+            entry_window_open = get_new_entry_block_reason() == ""
             refresh_due = (
                 last_refresh is None
                 or (now_for_refresh - last_refresh).total_seconds() >= refresh_interval * 60
             )
-            if no_open_positions and refresh_due:
+            if no_open_positions and refresh_due and entry_window_open:
                 try:
                     refresh_entry_symbols(reason="PERIODIC_NO_TRADE")
                 except Exception as _ref_exc:
@@ -3092,6 +3402,65 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             ce_symbol_override=live_state.get("current_ce_symbol") or ce_symbol,
             pe_symbol_override=live_state.get("current_pe_symbol") or pe_symbol,
         )
+
+        # PAPERTRADE_LIVE must enforce the same stop against the newest
+        # completed option candle even if an incremental rebuild leaves the
+        # strategy result marked as open.
+        if execution_mode == "PAPERTRADE_LIVE":
+            paper_open = trades.attrs.get("open_position") if hasattr(trades, "attrs") else None
+            paper_pending = live_state.get("paper_exit_pending") or {}
+            if paper_open and not day.empty:
+                paper_side = str(paper_open.get("side") or "").upper()
+                pending_matches = str(paper_pending.get("side") or "").upper() == paper_side
+                paper_ltp = safe_float(
+                    paper_pending.get("ltp") if pending_matches else day.iloc[-1].get("ce_close" if paper_side == "CE" else "pe_close"),
+                    0.0,
+                )
+                paper_stop = safe_float(
+                    paper_pending.get("stop") if pending_matches else paper_open.get("trailing_stop_price"),
+                    0.0,
+                )
+                if paper_side in {"CE", "PE"} and paper_ltp > 0 and ((pending_matches and paper_stop > 0) or (paper_stop > 0 and paper_ltp <= paper_stop)):
+                    paper_exit_price = apply_paper_exit_slippage(paper_ltp, side="SELL")
+                    paper_entry_price = safe_float(paper_open.get("entry_price"), 0.0)
+                    paper_qty = safe_int(paper_open.get("qty"), QTY)
+                    paper_pnl_points = paper_exit_price - paper_entry_price
+                    paper_pnl_rs = paper_pnl_points * paper_qty
+                    paper_realized = safe_float(trades.attrs.get("realized_mtm_rs"), 0.0) + paper_pnl_rs
+                    paper_exit_ts = paper_pending.get("exit_time") if pending_matches else day.iloc[-1].get("spot_ts") or day.iloc[-1].get("ts")
+                    paper_trade = {
+                        "run_mode": execution_mode,
+                        "trade_date": trade_date,
+                        "underlying": UNDERLYING_NAME,
+                        "side": paper_side,
+                        "option_symbol": str(paper_open.get("option_symbol") or (live_state.get("current_ce_symbol") if paper_side == "CE" else live_state.get("current_pe_symbol"))),
+                        "entry_time": paper_open.get("entry_time"),
+                        "exit_time": paper_exit_ts,
+                        "entry_reason": str(paper_open.get("entry_reason") or ""),
+                        "exit_reason": "TRAILING_SL_HIT",
+                        "entry_spot": safe_float(paper_open.get("entry_spot"), 0.0),
+                        "exit_spot": safe_float(day.iloc[-1].get("spot_close"), 0.0),
+                        "entry_price": paper_entry_price,
+                        "exit_price": paper_exit_price,
+                        "high_during_trade": safe_float(paper_open.get("high_during_trade"), paper_entry_price),
+                        "qty": paper_qty,
+                        "pnl_points": paper_pnl_points,
+                        "pnl_rs": paper_pnl_rs,
+                        "realized_mtm_after_trade": paper_realized,
+                        "mtf_entry_label": str(paper_open.get("mtf_entry_label") or ""),
+                        "mtf_exit_label": str(day.iloc[-1].get("mtf_label") or ""),
+                        "emergency_sl_pct_used": safe_float(paper_open.get("emergency_sl_pct_used"), 0.0),
+                        "emergency_sl_price": safe_float(paper_open.get("emergency_sl_price"), np.nan),
+                        "target_profit_points": safe_float(paper_open.get("target_profit_points"), 50.0),
+                        "trailing_status": "ladder_hit",
+                    }
+                    trades = pd.concat([trades, pd.DataFrame([paper_trade])], ignore_index=True)
+                    trades.attrs.update({
+                        "open_position": None,
+                        "realized_mtm_rs": paper_realized,
+                        "guard_stop_reason": "TRAILING_SL_HIT",
+                    })
+                    live_state["paper_exit_pending"] = None
         live_state["final_trades"] = trades
 
         new_events_added = append_broker_forced_exit_trades()
@@ -3204,6 +3573,12 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         emergency_sl_price=safe_float(trade.get("emergency_sl_price"), np.nan),
                     )
                     trade_record = trade.to_dict()
+                    if execution_mode == "LIVE_ORDER":
+                        force_exit_active = live_state.get("force_exit_triggered") or datetime.now(IST) >= force_exit_ts
+                        resolved_exit_reason = "FORCE_EXIT" if force_exit_active else str(trade_record.get("exit_reason") or "STRATEGY_EXIT")
+                        resolved_exit_reason = normalize_exit_reason(resolved_exit_reason)
+                        trade_record["exit_reason"] = resolved_exit_reason
+                        sell_event_row["event_reason"] = resolved_exit_reason
                     sell_event_row["trailing_status"] = str(trade_record.get("trailing_status") or get_execution_trailing_status(sell_event_row, trade_record))
                     if execution_mode == "LIVE_ORDER":
                         broker_entry = live_state["broker_positions"].get(closed_order_event_id, {})
@@ -3270,7 +3645,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                             "broker_exit_order_id": str(order_meta.get("exit_order_id", "")),
                             "broker_exit_avg_price": actual_exit_price,
                             "broker_exit_time": actual_exit_time,
-                            "broker_exit_reason": str(trade_record.get("exit_reason", "STRATEGY_EXIT")),
+                            "broker_exit_reason": normalize_exit_reason(str(trade_record.get("exit_reason", "STRATEGY_EXIT"))),
                             "manual_or_broker_exit_detected": True,
                             "broker_open_qty": 0,
                             "exit_in_progress": False,
@@ -3351,6 +3726,15 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
 
         # --- Now print deferred BUY (after closed trades, so chronological order is preserved) ---
         if pending_buy is not None:
+            gate_reason = get_new_entry_block_reason()
+            if gate_reason:
+                log_entry_diag("BLOCK_TIME_WINDOW", pending_buy, extra=gate_reason)
+                if live_state.get("last_entry_block_reason") != gate_reason:
+                    print(f"[ENTRY BLOCK] Fresh entry skipped due to {gate_reason}")
+                    live_state["last_entry_block_reason"] = gate_reason
+                pending_buy = None
+
+        if pending_buy is not None:
             blocked, block_reason, smart_actual_price = should_block_smart_entry(live_state, pending_buy, execution_mode)
             if blocked:
                 log_entry_diag("BLOCK_SMART_ENTRY", pending_buy, extra=block_reason)
@@ -3358,6 +3742,19 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 pending_buy = None
 
         if pending_buy is not None:
+            if execution_mode == "LIVE_ORDER":
+                current_open_positions = get_open_local_position_count(live_state)
+                if current_open_positions >= safe_int(MAX_CONCURRENT_TRADES, 1):
+                    log_entry_diag(
+                        "BLOCK_MAX_CONCURRENT",
+                        pending_buy,
+                        extra=f"open={current_open_positions} cfg={safe_int(MAX_CONCURRENT_TRADES, 1)}",
+                    )
+                    # Skip PRE_ENTRY symbol refresh/noise when an existing open trade already uses capacity.
+                    emit_open_position_pnl_update(trades)
+                    emit_heartbeat()
+                    detect_tick_stall()
+                    return
             # Ensure symbols are refreshed right before any entry in all modes (BACKTEST/PAPERTEST/PAPERTRADE_LIVE/LIVE_ORDER)
             try:
                 refresh_entry_symbols(reason="PRE_ENTRY")
@@ -3439,6 +3836,12 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         pending_buy,
                         extra=f"open={current_open_positions} cfg={safe_int(MAX_CONCURRENT_TRADES, 1)}",
                     )
+                    if current_open_positions > 0:
+                        # Keep runtime noise low while an open position is active; continue PnL visibility.
+                        emit_open_position_pnl_update(trades)
+                        emit_heartbeat()
+                        detect_tick_stall()
+                        return
                     if not live_state.get("max_trades_block_logged"):
                         print(
                             f"[MAX CONCURRENT BLOCK] Fresh entry skipped because open position count reached "
@@ -3530,12 +3933,13 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 event_row.update(order_meta)
                 event_row["option_price"] = actual_entry_price
                 event_row["event_time"] = actual_entry_time
+                actual_entry_time_resolved = actual_entry_time or pending_buy["entry_time"]
                 live_state["broker_positions"][current_open_event_id] = {
                     "side": str(pending_buy["side"]),
                     "option_symbol": option_symbol,
                     "qty": int(pending_buy.get("qty", QTY)),
                     "entry_reason": str(pending_buy["entry_reason"]),
-                    "entry_time": pending_buy["entry_time"],
+                    "entry_time": actual_entry_time_resolved,
                     "entry_spot": float(pending_buy["entry_spot"]),
                     "signal_time": pending_buy["entry_time"],
                     "signal_spot_price": float(pending_buy["entry_spot"]),
@@ -3623,6 +4027,60 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
         if live_state["spot_rows"] and live_state["ce_rows"] and live_state["pe_rows"]:
             rebuild_and_print()
 
+    def sync_paper_position_from_tick():
+        if execution_mode != "PAPERTRADE_LIVE" or live_state.get("paper_exit_pending"):
+            return
+        final_trades = live_state.get("final_trades")
+        if not isinstance(final_trades, pd.DataFrame):
+            return
+        open_position = final_trades.attrs.get("open_position")
+        if not open_position:
+            return
+
+        side = str(open_position.get("side") or "").upper()
+        option_ltp = get_option_ltp_from_live_state(live_state, side)
+        entry_price = safe_float(open_position.get("entry_price"), 0.0)
+        if side not in {"CE", "PE"} or option_ltp <= 0 or entry_price <= 0:
+            return
+
+        previous_best = safe_float(open_position.get("best_price"), entry_price)
+        best_price = max(previous_best, option_ltp)
+        pnl_points = option_ltp - entry_price
+        current_stop = safe_float(
+            open_position.get("trailing_stop_price"),
+            safe_float(open_position.get("emergency_sl_price"), 0.0),
+        )
+        stage1_triggered = current_stop > safe_float(open_position.get("emergency_sl_price"), 0.0)
+        current_time = live_state.get("last_tick_exchange_ts") or datetime.now(IST)
+        trailing_stop = get_trailing_stop_for_profit(
+            entry_price,
+            pnl_points,
+            current_stop,
+            current_time=current_time,
+            stage1_triggered=stage1_triggered,
+        )
+        try:
+            active_stages = TRAILING_PROFIT_STAGES
+            min_trigger = float(active_stages[0][0]) if active_stages else None
+        except Exception:
+            min_trigger = None
+        if min_trigger is not None and pnl_points < min_trigger and trailing_stop > option_ltp:
+            trailing_stop = current_stop
+
+        open_position.update({
+            "best_price": round(best_price, 2),
+            "high_during_trade": round(best_price, 2),
+            "trailing_stop_price": safe_float(trailing_stop, 0.0),
+            "trailing_stop_active": bool(safe_float(trailing_stop, 0.0) > safe_float(open_position.get("emergency_sl_price"), 0.0)),
+        })
+        if open_position.get("trailing_stop_active") and option_ltp <= safe_float(trailing_stop, 0.0):
+            live_state["paper_exit_pending"] = {
+                "side": side,
+                "ltp": option_ltp,
+                "stop": safe_float(trailing_stop, 0.0),
+                "exit_time": current_time,
+            }
+
     def on_ticks(ws, ticks):
         try:
             for tick in ticks:
@@ -3653,6 +4111,8 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     state["low"] = min(state["low"], ltp)
                     state["close"] = ltp
                     state["volume"] = float(tick.get("volume_traded") or state.get("volume", 0.0) or 0.0)
+
+                    sync_paper_position_from_tick()
 
             # Keep broker/manual exit detection responsive even if strategy candle flow stalls.
             if execution_mode == "LIVE_ORDER":
@@ -3686,9 +4146,11 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     f">= configured_force_exit={force_exit_ts.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                 )
                 if execution_mode == "LIVE_ORDER":
-                    force_exit_live_order_positions(exit_reason="#sym:FORCE_EXIT")
+                    force_exit_live_order_positions(exit_reason="FORCE_EXIT")
                     sync_broker_positions_if_needed(force=True)
                     append_broker_forced_exit_trades()
+                elif execution_mode == "PAPERTRADE_LIVE":
+                    run_shutdown_cleanup("FORCE_EXIT")
                 live_state["stop"] = True
                 finalize_completed_minutes(force_all=True)
             else:
@@ -3888,10 +4350,25 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                             break
                     now_local = datetime.now(IST)
                     exit_reason = "FORCE_EXIT" if now_local >= force_exit_ts else "SESSION_STOP"
+                    exit_time = force_exit_ts if exit_reason == "FORCE_EXIT" else now_local
                     exit_option_price = get_option_ltp_from_live_state(live_state, side)
+                    if exit_option_price <= 0 and option_symbol:
+                        try:
+                            exit_option_price = get_option_symbol_ltp(kite, option_symbol)
+                        except Exception:
+                            exit_option_price = 0.0
                     if exit_option_price <= 0:
                         exit_option_price = entry_price
+                    open_high_during_trade = safe_float(open_pos.get("high_during_trade"), entry_price)
+                    if open_high_during_trade <= 0:
+                        open_high_during_trade = entry_price
+                    shutdown_high_during_trade = max(open_high_during_trade, entry_price, exit_option_price)
                     exit_spot_price = get_spot_ltp_from_live_state(live_state)
+                    if exit_spot_price <= 0:
+                        try:
+                            exit_spot_price = get_spot_ltp(kite, UNDERLYING_NAME)
+                        except Exception:
+                            exit_spot_price = 0.0
                     if exit_spot_price <= 0:
                         exit_spot_price = entry_spot
 
@@ -3906,7 +4383,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         underlying=UNDERLYING_NAME,
                         side=side,
                         option_symbol=option_symbol,
-                        event_time=now_local,
+                        event_time=exit_time,
                         event_reason=exit_reason,
                         spot_price=exit_spot_price,
                         option_price=exit_option_price,
@@ -3930,13 +4407,15 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         "side": side,
                         "option_symbol": option_symbol,
                         "entry_time": open_pos.get("entry_time"),
-                        "exit_time": now_local,
+                        "exit_time": exit_time,
                         "entry_reason": str(open_pos.get("entry_reason", "")),
                         "exit_reason": exit_reason,
                         "entry_spot": entry_spot,
                         "exit_spot": exit_spot_price,
                         "entry_price": entry_price,
                         "exit_price": exit_option_price,
+                        "best_price": round(float(shutdown_high_during_trade), 2),
+                        "high_during_trade": round(float(shutdown_high_during_trade), 2),
                         "qty": qty,
                         "pnl_points": pnl_points,
                         "pnl_rs": pnl_rs,
@@ -3999,12 +4478,23 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 print("Total trades       : 0")
                 print("Net P&L (Rs)       : 0.00")
 
-            open_pos = None
-            try:
-                open_pos = live_state.get("final_trades").attrs.get("open_position")
-            except Exception:
-                open_pos = None
-            print(f"Open position      : {'YES' if open_pos else 'NO'}")
+            open_pos_active = False
+            if execution_mode == "LIVE_ORDER":
+                for broker_entry in (live_state.get("broker_positions") or {}).values():
+                    if safe_int(broker_entry.get("broker_open_qty"), 0) > 0 and not bool(broker_entry.get("manual_or_broker_exit_detected")):
+                        open_pos_active = True
+                        break
+            elif execution_mode == "PAPERTRADE_LIVE":
+                events = live_state.get("live_events") or []
+                buy_count = sum(1 for ev in events if str(ev.get("event_type") or "").upper() == "BUY")
+                sell_count = sum(1 for ev in events if str(ev.get("event_type") or "").upper() == "SELL")
+                open_pos_active = buy_count > sell_count
+            else:
+                try:
+                    open_pos_active = bool(live_state.get("final_trades").attrs.get("open_position"))
+                except Exception:
+                    open_pos_active = False
+            print(f"Open position      : {'YES' if open_pos_active else 'NO'}")
             if live_state.get("excel_file_path"):
                 print(f"Excel file         : {live_state.get('excel_file_path')}")
             print("==============================================")
@@ -4067,6 +4557,8 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
     watchdog_thread = threading.Thread(target=watchdog_loop, name="tick-watchdog-v28", daemon=True)
     live_state["watchdog_thread"] = watchdog_thread
     watchdog_thread.start()
+
+    adopt_open_live_positions_from_broker()
 
     print(f"Starting {execution_mode}... Press Ctrl+C to stop (will auto-exit open positions).")
     MAX_WS_RECONNECTS = 10
@@ -4762,6 +5254,8 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
             "entry_reason": entry_reason,
             "entry_spot": entry_spot,
             "entry_price": entry_price,
+            "best_price": round(float(best_price), 2) if best_price is not None else round(float(entry_price), 2),
+            "high_during_trade": round(float(best_price), 2) if best_price is not None else round(float(entry_price), 2),
             "qty": QTY,
             "mtf_entry_label": entry_label,
             "gap_type": market_ctx.get("gap_type", ""),
@@ -4771,6 +5265,8 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
             "cpr_width_pct": market_ctx.get("cpr_width_pct", ""),
             "emergency_sl_pct_used": emergency_sl_pct_used,
             "emergency_sl_price": emergency_sl_price,
+            "trailing_stop_price": safe_float(sl, 0.0),
+            "trailing_stop_active": bool(trailing_stop_active),
             "target_profit_points": next((float(pt) for pt, _ in TRAILING_PROFIT_STAGES if (best_price - entry_price if best_price is not None and entry_price is not None else 0.0) < float(pt)), float(TRAILING_PROFIT_STAGES[-1][0]) if TRAILING_PROFIT_STAGES else 50.0),
             "trailing_status": "ladder_pending",
         }
@@ -5191,11 +5687,34 @@ def get_running_script_name() -> str:
     except NameError:
         return ""
 
+
+def emit_startup_banner() -> None:
+    run_id = f"{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    host = os.getenv("HOSTNAME") or os.getenv("COMPUTERNAME") or "unknown-host"
+    python_ver = sys.version.split()[0]
+    script_name = get_running_script_name() or "unknown-script"
+    started_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S %Z")
+    banner_trade_date = datetime.now(IST).strftime("%Y-%m-%d") if RUN_MODE in {"PAPERTRADE_LIVE", "LIVE_ORDER"} else TRADE_DATE
+    print(
+        "[RUN BANNER] "
+        f"run_id={run_id} "
+        f"script={script_name} "
+        f"version={LOG_IDENTIFIER or 'default'} "
+        f"mode={RUN_MODE} "
+        f"trade_date={banner_trade_date} "
+        f"host={host} "
+        f"pid={os.getpid()} "
+        f"python={python_ver} "
+        f"cwd={os.getcwd()} "
+        f"started_ist={started_ist}"
+    )
+
 # MAIN EXECUTION
 # =========================
 RUN_MODE = normalize_run_mode(RUN_MODE)
 
 try:
+    emit_startup_banner()
     print("Connecting to Kite...")
     kite = KiteConnect(api_key=API_KEY)
     kite.set_access_token(ACCESS_TOKEN)
@@ -5218,11 +5737,12 @@ try:
 
             print("Auto-selecting ATM CE/PE symbols...")
             print(f"Using underlying token: {UNDERLYING_TOKEN}")
+            live_ref_trade_date = str(_cli_args.date or now_ist.strftime("%Y-%m-%d"))
 
             spot_ltp = 0.0
             if RUN_MODE in {"PAPERTRADE_LIVE", "LIVE_ORDER"}:
                 try:
-                    spot_ref_df = fetch_history(kite, UNDERLYING_TOKEN, TRADE_DATE, BASE_INTERVAL)
+                    spot_ref_df = fetch_history(kite, UNDERLYING_TOKEN, live_ref_trade_date, BASE_INTERVAL)
                     if not spot_ref_df.empty:
                         ref = str(AUTO_SELECT_SPOT_REF or "").lower()
                         if ref == "open" and "open" in spot_ref_df.columns:
@@ -5236,7 +5756,10 @@ try:
                             if "close" in spot_ref_df.columns and not spot_ref_df["close"].dropna().empty:
                                 spot_ltp = float(spot_ref_df["close"].dropna().iloc[-1])
                     if spot_ltp > 0:
-                        print(f"Spot LTP resolved from historical ref '{AUTO_SELECT_SPOT_REF}': {spot_ltp}")
+                        print(
+                            f"Spot LTP resolved from historical ref '{AUTO_SELECT_SPOT_REF}' "
+                            f"for {live_ref_trade_date}: {spot_ltp}"
+                        )
                 except Exception as _hist_ref_exc:
                     print(f"[LIVE AUTO-SELECT REF WARNING] {_hist_ref_exc}")
 

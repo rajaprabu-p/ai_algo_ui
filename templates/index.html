@@ -299,6 +299,7 @@
         <div class="card">
           <div>
             <button id="loadTradeDetails">Load Trade Details</button>
+            <button id="updateGapSummary">Update Gap in Summary (Broker)</button>
             <span id="tradeDetailsInfo" style="margin-left:0.6rem"></span>
           </div>
           <div class="pnl-summary">
@@ -307,6 +308,31 @@
             <div class="pnl-chip">Total PnL (Pts): <span id="pnlPts">-</span></div>
             <div class="pnl-chip">Wins: <span id="pnlWins">-</span></div>
             <div class="pnl-chip">Loss/Flat: <span id="pnlLoss">-</span></div>
+          </div>
+          <div style="margin-top:0.55rem;font-weight:700;color:#334155;">Per-File Market Context</div>
+          <div class="table-wrap">
+            <table class="pnl-table" id="marketContextTable">
+              <thead>
+                <tr>
+                  <th>Source File</th>
+                  <th>nifty_prev_close</th>
+                  <th>nifty_open</th>
+                  <th>gap_type</th>
+                  <th>gap_points</th>
+                  <th>nifty_high</th>
+                  <th>nifty_high_time</th>
+                  <th>high_change</th>
+                  <th>nifty_low</th>
+                  <th>nifty_low_time</th>
+                  <th>low_change</th>
+                  <th>nifty_close</th>
+                  <th>nifty_change</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td colspan="13">No market context loaded.</td></tr>
+              </tbody>
+            </table>
           </div>
           <div class="table-wrap">
             <table class="pnl-table" id="pnlTable">
@@ -319,6 +345,7 @@
                   <th>Symbol</th>
                   <th>Spot Price</th>
                   <th>Entry</th>
+                  <th>High</th>
                   <th>Exit</th>
                   <th>PnL Pts</th>
                   <th>PnL Rs</th>
@@ -326,7 +353,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr><td colspan="10">No trade details loaded.</td></tr>
+                <tr><td colspan="12">No trade details loaded.</td></tr>
               </tbody>
             </table>
           </div>
@@ -775,7 +802,6 @@
         if(activeFilters.length > 0){
           filteredFiles = xlsxFiles.filter(f => activeFilters.some(fn => fn(f)));
         }
-
         const filterParts = [];
         if(onlyBacktest) filterParts.push('backtest');
         if(onlyPapertrade) filterParts.push('papertrade');
@@ -808,7 +834,7 @@
       function setTradeDetailsTableRows(rows){
         const tbody = document.querySelector('#pnlTable tbody');
         if(!rows || rows.length === 0){
-          tbody.innerHTML = '<tr><td colspan="11">No trade rows found in selected file(s).</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="12">No trade rows found in selected file(s).</td></tr>';
           return;
         }
 
@@ -829,6 +855,7 @@
             '<td>' + (r.option_symbol ?? '-') + '</td>' +
             '<td>' + fmt2(spotPrice) + '</td>' +
             '<td>' + fmt2(r.entry_price) + '</td>' +
+            '<td>' + fmt2(r.high_during_trade) + '</td>' +
             '<td>' + fmt2(r.exit_price) + '</td>' +
             '<td>' + fmt2(r.pnl_points) + '</td>' +
             '<td style="color:' + color + ';font-weight:700">' + fmt2(r.pnl_rs) + '</td>' +
@@ -836,6 +863,107 @@
           '</tr>';
         }).join('');
         tbody.innerHTML = html;
+      }
+
+      function setMarketContextFields(ctx){
+        const data = ctx || {};
+        const setVal = (id, val) => {
+          const el = document.getElementById(id);
+          if(!el) return;
+          const txt = (val === null || val === undefined || String(val).trim() === '') ? '-' : String(val);
+          el.textContent = txt;
+        };
+        setVal('ctxGapType', data.gap_type);
+        setVal('ctxGapPoints', data.gap_points);
+        setVal('ctxGapPct', data.gap_pct);
+        setVal('ctxCprPivot', data.cpr_pivot);
+        setVal('ctxCprBc', data.cpr_bc);
+        setVal('ctxCprTc', data.cpr_tc);
+        setVal('ctxCprWidth', data.cpr_width);
+        setVal('ctxCprWidthPct', data.cpr_width_pct);
+        setVal('ctxCprType', data.cpr_type);
+      }
+
+      function setPerFileMarketContextGrid(fileReports){
+        const tbody = document.querySelector('#marketContextTable tbody');
+        if(!tbody) return;
+        const reports = Array.isArray(fileReports) ? fileReports : [];
+        if(reports.length === 0){
+          tbody.innerHTML = '<tr><td colspan="13">No market context loaded.</td></tr>';
+          return;
+        }
+
+        const sortedReports = [...reports].sort((a, b) => {
+          const af = String(a?.file || '').toLowerCase();
+          const bf = String(b?.file || '').toLowerCase();
+          return af.localeCompare(bf);
+        });
+
+        const valueOrDash = (v) => {
+          if(v === null || v === undefined) return '-';
+          const s = String(v).trim();
+          return s === '' ? '-' : s;
+        };
+
+        const numericOrNaN = (v) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? n : NaN;
+        };
+
+        const fmtChange = (v) => {
+          if(!Number.isFinite(v)) return '-';
+          return v.toFixed(0);
+        };
+
+        const niftyChangeStyle = (val) => {
+          const s = String(val ?? '').trim();
+          if(!s || s === '-' || s.toUpperCase() === 'MULTIPLE') return '';
+          if(s.startsWith('+')) return 'color:#166534;font-weight:700';
+          if(s.startsWith('-')) return 'color:#b91c1c;font-weight:700';
+          return 'color:#334155;font-weight:700';
+        };
+
+        const gapTypeStyle = (val) => {
+          const s = String(val ?? '').trim().toUpperCase();
+          if(!s || s === '-' || s === 'MULTIPLE') return '';
+          if(s === 'GAP_UP') return 'color:#166534;font-weight:700';
+          if(s === 'GAP_DOWN') return 'color:#b91c1c;font-weight:700';
+          return 'color:#334155;font-weight:700';
+        };
+
+        const rowsHtml = sortedReports.map(rep => {
+          const ctx = rep.market_context || {};
+          if(!rep.ok){
+            return '<tr>' +
+              '<td>' + valueOrDash(rep.file) + '</td>' +
+              '<td colspan="12" style="color:#b91c1c;font-weight:600">' + valueOrDash(rep.msg || 'Failed to load') + '</td>' +
+            '</tr>';
+          }
+
+          const openVal = numericOrNaN(ctx.nifty_open);
+          const highVal = numericOrNaN(ctx.nifty_high);
+          const lowVal = numericOrNaN(ctx.nifty_low);
+          const highChange = highVal - openVal;
+          const lowChange = lowVal - openVal;
+
+          return '<tr>' +
+            '<td>' + valueOrDash(rep.file) + '</td>' +
+            '<td>' + valueOrDash(ctx.nifty_prev_close) + '</td>' +
+            '<td>' + valueOrDash(ctx.nifty_open) + '</td>' +
+            '<td style="' + gapTypeStyle(ctx.gap_type) + '">' + valueOrDash(ctx.gap_type) + '</td>' +
+            '<td>' + valueOrDash(ctx.gap_points) + '</td>' +
+            '<td>' + valueOrDash(ctx.nifty_high) + '</td>' +
+            '<td>' + valueOrDash(ctx.nifty_high_time) + '</td>' +
+            '<td>' + fmtChange(highChange) + '</td>' +
+            '<td>' + valueOrDash(ctx.nifty_low) + '</td>' +
+            '<td>' + valueOrDash(ctx.nifty_low_time) + '</td>' +
+            '<td>' + fmtChange(lowChange) + '</td>' +
+            '<td>' + valueOrDash(ctx.nifty_close) + '</td>' +
+            '<td style="' + niftyChangeStyle(ctx.nifty_change) + '">' + valueOrDash(ctx.nifty_change) + '</td>' +
+          '</tr>';
+        }).join('');
+
+        tbody.innerHTML = rowsHtml;
       }
 
       function isBacktestFileName(name){
@@ -894,6 +1022,8 @@
         if(!r.ok || !j.ok){
           infoEl.className = 'status-fail';
           infoEl.textContent = 'Failed: ' + (j.msg || ('HTTP ' + r.status));
+          setMarketContextFields({});
+          setPerFileMarketContextGrid([]);
           return;
         }
 
@@ -903,9 +1033,56 @@
         document.getElementById('pnlWins').textContent = String(j.summary?.win_trades ?? '-');
         document.getElementById('pnlLoss').textContent = String(j.summary?.loss_or_flat_trades ?? '-');
 
+        setMarketContextFields(j.market_context || {});
+        setPerFileMarketContextGrid(j.file_reports || []);
         setTradeDetailsTableRows(j.rows || []);
         infoEl.className = 'status-ok';
         infoEl.textContent = 'Loaded consolidated details from ' + names.length + ' file(s).';
+      }
+
+      async function updateGapSummaryFromBroker(){
+        const names = getSelectedLogFiles();
+        const infoEl = document.getElementById('tradeDetailsInfo');
+        if(!names || names.length === 0){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Select at least one .xlsx log file first.';
+          return;
+        }
+
+        const invalid = names.filter(n => !/\.xlsx$/i.test(String(n || '')));
+        if(invalid.length > 0){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Select only .xlsx files for gap update.';
+          return;
+        }
+
+        infoEl.className = '';
+        infoEl.textContent = 'Updating gap details from broker...';
+
+        const r = await fetch('/api/log-files/update-gap-summary', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ files: names })
+        });
+        const j = await r.json().catch(() => ({ok:false,msg:'Invalid response'}));
+        if(!r.ok || !j.ok){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Gap update failed: ' + (j.msg || ('HTTP ' + r.status));
+          return;
+        }
+
+        const updated = Number(j.updated || 0);
+        const total = Number(j.total || names.length);
+        const failed = Math.max(0, total - updated);
+        if(failed > 0){
+          infoEl.className = 'status-fail';
+          infoEl.textContent = 'Gap updated for ' + updated + '/' + total + ' file(s). Check API response for skipped files.';
+        } else {
+          infoEl.className = 'status-ok';
+          infoEl.textContent = 'Gap details updated in summary sheet for ' + updated + ' file(s).';
+        }
+
+        await loadTradeDetailsFromSelectedLog();
       }
 
       async function consolidateSelectedLogs(){
@@ -1126,6 +1303,10 @@
 
       document.getElementById('loadTradeDetails').addEventListener('click', async () => {
         await loadTradeDetailsFromSelectedLog();
+      });
+
+      document.getElementById('updateGapSummary').addEventListener('click', async () => {
+        await updateGapSummaryFromBroker();
       });
 
       document.getElementById('logout').addEventListener('click', async () => {
