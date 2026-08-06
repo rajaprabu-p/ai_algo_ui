@@ -9,4 +9,5 @@ logs/
 !templates/
 !templates/**
 !.gitignore
+!requirements.txt
 .env

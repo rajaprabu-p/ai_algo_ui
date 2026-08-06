@@ -509,7 +509,12 @@ def cancel_exit_orders(kite: KiteConnect, broker_entry: Dict) -> None:
     for key in ('emergency_sl_order_id', 'exit_order_id'):
         oid = str(broker_entry.get(key) or '').strip()
         if oid:
-            cancel_order_if_open(kite, oid)
+            if cancel_order_if_open(kite, oid):
+                for _ in range(10):
+                    time.sleep(0.2)
+                    status = normalize_order_status(get_order_snapshot(kite, oid).get('status'))
+                    if status in {'CANCELLED', 'REJECTED', 'COMPLETE'}:
+                        break
 
 
 def get_net_position_qty(kite: KiteConnect, tradingsymbol: str, exchange: str = OPTION_EXCHANGE, product: str = LIVE_ORDER_PRODUCT) -> int:
@@ -1333,6 +1338,13 @@ def should_block_smart_entry(live_state: Dict, pending_buy: Dict, execution_mode
 
 def safe_place_live_exit_order(kite: KiteConnect, side: str, ce_symbol: str, pe_symbol: str, qty: int, broker_entry: Optional[Dict] = None) -> Dict:
     broker_entry = broker_entry or {}
+    # Ensure any standing emergency SL / existing exit orders are cancelled
+    try:
+        cancel_exit_orders(kite, broker_entry)
+        if broker_entry.get("emergency_sl_order_id"):
+            print(f"[EXIT PREP] Attempted cancel of emergency SL {broker_entry.get('emergency_sl_order_id')}")
+    except Exception:
+        print(f"[EXIT PREP WARNING] Failed to cancel existing SL/exit orders for {broker_entry.get('option_symbol')}")
     if broker_entry.get("exit_in_progress"):
         return {"skipped": True, "skip_reason": "EXIT_ALREADY_IN_PROGRESS"}
     existing_exit_order_id = str(broker_entry.get("exit_order_id") or broker_entry.get("broker_exit_order_id") or "").strip()
@@ -3109,13 +3121,16 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     pnl_points_live = option_ltp - entry_price_actual
                     synced["live_pnl_points"] = pnl_points_live
                     current_stop = safe_float(synced.get("trailing_stop_price"), safe_float(synced.get("emergency_sl_price"), 0.0))
+                    _stage1_hit = bool(synced.get("trailing_stop_active"))
+                    if not _stage1_hit and current_stop > safe_float(synced.get("emergency_sl_price"), 0.0):
+                        synced["trailing_stop_price"] = safe_float(synced.get("emergency_sl_price"), 0.0)
+                        current_stop = safe_float(synced.get("trailing_stop_price"), 0.0)
                     trailing_stop_price = get_trailing_stop_for_profit(entry_price_actual, pnl_points_live, current_stop)
                     # Sanity-check the computed trailing stop before applying it.
                     # Only adopt a raised trailing stop (entry_price + stop_profit)
                     # as actionable if the live PnL has reached at least the first
                     # configured trigger level; otherwise keep the previous stop to
                     # avoid an immediate accidental exit.
-                    _stage1_hit = safe_float(synced.get("trailing_stop_price"), 0.0) > safe_float(synced.get("emergency_sl_price"), 0.0)
                     min_trigger = None
                     try:
                         active = TRAILING_PROFIT_STAGES
@@ -3132,6 +3147,8 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         synced["trailing_stop_price"] = current_stop
                     else:
                         synced["trailing_stop_price"] = trailing_stop_price
+                    if min_trigger is not None and pnl_points_live >= float(min_trigger):
+                        synced["trailing_stop_active"] = True
 
                     if synced.get("trailing_stop_price", 0) > 0 and option_ltp <= float(synced.get("trailing_stop_price", 0)):
                         print(
@@ -3395,12 +3412,15 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
         for k, v in (live_state.get("market_context") or {}).items():
             day.attrs[k] = v
         live_state["last_day_debug_df"] = day.copy()
+        paper_position_active = execution_mode == "PAPERTRADE_LIVE" and live_state.get("active_order_event_id") is not None
+        live_symbols_locked = execution_mode == "LIVE_ORDER" and live_state.get("locked_trade_strike_active")
         trades = run_single_day_test(
             day,
             execution_mode,
             tracking_start_override=live_tracking_start,
             ce_symbol_override=live_state.get("current_ce_symbol") or ce_symbol,
             pe_symbol_override=live_state.get("current_pe_symbol") or pe_symbol,
+            lock_symbols_during_open=paper_position_active or live_symbols_locked,
         )
 
         # PAPERTRADE_LIVE must enforce the same stop against the newest
@@ -3735,6 +3755,15 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 pending_buy = None
 
         if pending_buy is not None:
+            if execution_mode == "LIVE_ORDER" and is_signal_too_old(pending_buy.get("entry_time"), datetime.now(IST)):
+                log_entry_diag("BLOCK_STALE_LIVE_SIGNAL", pending_buy)
+                print(
+                    f"[LIVE ENTRY BLOCK] Stale signal skipped: symbol={pending_buy.get('option_symbol')} "
+                    f"signal_time={pending_buy.get('entry_time')} max_age={safe_int(MAX_ENTRY_SIGNAL_AGE_SECONDS, 300)}s"
+                )
+                pending_buy = None
+
+        if pending_buy is not None:
             blocked, block_reason, smart_actual_price = should_block_smart_entry(live_state, pending_buy, execution_mode)
             if blocked:
                 log_entry_diag("BLOCK_SMART_ENTRY", pending_buy, extra=block_reason)
@@ -3755,11 +3784,14 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     emit_heartbeat()
                     detect_tick_stall()
                     return
-            # Ensure symbols are refreshed right before any entry in all modes (BACKTEST/PAPERTEST/PAPERTRADE_LIVE/LIVE_ORDER)
-            try:
-                refresh_entry_symbols(reason="PRE_ENTRY")
-            except Exception:
-                pass
+            # The pending signal was generated from the current symbol pair. In
+            # paper mode, refreshing here could replace that pair before the
+            # position is recorded and make later rebuilds price another strike.
+            if execution_mode == "LIVE_ORDER":
+                try:
+                    refresh_entry_symbols(reason="PRE_ENTRY")
+                except Exception:
+                    pass
             log_entry_diag("ENTRY_PREPARED", pending_buy)
             event_row = format_live_event_row(
                 event_type="BUY",
@@ -3950,6 +3982,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     "emergency_sl_pct_used": safe_float(order_meta.get("emergency_sl_pct_used"), 0.0),
                     "exit_in_progress": False,
                     "best_price": actual_entry_price,
+                    "trailing_stop_active": False,
                     "trailing_stop_price": safe_float(order_meta.get("emergency_sl_price"), 0.0),
                     "target_profit_points": float(TRAILING_PROFIT_STAGES[0][0]) if TRAILING_PROFIT_STAGES else 50.0,
                     **order_meta,
@@ -3968,6 +4001,11 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             print(pd.DataFrame([event_row]).to_string(index=False))
             live_state["live_events"].append(event_row)
             live_state["printed_buy_event_ids"].add(current_open_event_id)
+            if execution_mode == "PAPERTRADE_LIVE":
+                lock_entry_symbols_to_first_trade_strike(
+                    str(event_row.get("option_symbol") or pending_buy.get("option_symbol") or ""),
+                    reason="OPEN_POSITION",
+                )
             log_entry_diag("BUY_EMITTED", pending_buy)
             new_events_added = True
 
@@ -4083,6 +4121,8 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
 
     def on_ticks(ws, ticks):
         try:
+            if live_state.get("stop") or live_state.get("shutdown_cleanup_done"):
+                return
             for tick in ticks:
                 token = tick["instrument_token"]
                 if token not in token_to_key:
@@ -4151,6 +4191,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     append_broker_forced_exit_trades()
                 elif execution_mode == "PAPERTRADE_LIVE":
                     run_shutdown_cleanup("FORCE_EXIT")
+                    return
                 live_state["stop"] = True
                 finalize_completed_minutes(force_all=True)
             else:
@@ -4428,6 +4469,10 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     }
                     live_state["live_trade_events"].append(trade_record)
                     live_state["realized_live_pnl_rs"] = realized_after
+                    live_state["paper_exit_pending"] = None
+                    if isinstance(live_state.get("final_trades"), pd.DataFrame):
+                        live_state["final_trades"].attrs["open_position"] = None
+                        live_state["final_trades"].attrs["realized_mtm_rs"] = realized_after
 
                     print(
                         f"  Paper open position closed on shutdown: {side} {option_symbol} "
@@ -4672,6 +4717,10 @@ def resample_to_5m(spot: pd.DataFrame) -> pd.DataFrame:
         "close": x["close"].resample(MTF_INTERVAL).last(),
         "volume": x["volume"].resample(MTF_INTERVAL).sum(),
     }).dropna().reset_index()
+    # A 5-minute trend candle is usable only after its final 1-minute candle.
+    # Shift the bucket label from its start (09:20) to its close (09:24) so
+    # backtests cannot use future minutes that live mode has not seen yet.
+    out["ts"] = out["ts"] + pd.Timedelta(minutes=4)
     return out
 
 
@@ -4783,7 +4832,7 @@ def prepare_merged_day(spot_1m: pd.DataFrame, ce_1m: pd.DataFrame, pe_1m: pd.Dat
         ce_i.sort_values("ce_ts"),
         left_on="spot_ts",
         right_on="ce_ts",
-        direction="nearest",
+        direction="backward",
         tolerance=pd.Timedelta("2min")
     )
     day = pd.merge_asof(
@@ -4791,7 +4840,7 @@ def prepare_merged_day(spot_1m: pd.DataFrame, ce_1m: pd.DataFrame, pe_1m: pd.Dat
         pe_i.sort_values("pe_ts"),
         left_on="spot_ts",
         right_on="pe_ts",
-        direction="nearest",
+        direction="backward",
         tolerance=pd.Timedelta("2min")
     )
 
@@ -4803,7 +4852,7 @@ def prepare_merged_day(spot_1m: pd.DataFrame, ce_1m: pd.DataFrame, pe_1m: pd.Dat
     return day
 
 
-def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm: float = 0.0, tracking_start_override=None, ce_symbol_override: Optional[str] = None, pe_symbol_override: Optional[str] = None) -> pd.DataFrame:
+def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm: float = 0.0, tracking_start_override=None, ce_symbol_override: Optional[str] = None, pe_symbol_override: Optional[str] = None, lock_symbols_during_open: bool = False) -> pd.DataFrame:
     run_mode = normalize_run_mode(run_mode)
     session_trade_date = str(TRADE_DATE)
     if day is not None and not day.empty and "spot_ts" in day.columns:
@@ -4889,7 +4938,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
             # print(f"Checking entry conditions at {ts}... (realized MTM={realized_mtm_rs:.2f} rs, trade_count={trade_count})")
 
             # Periodic ATM symbol refresh in backtest: re-select every N minutes when flat
-            if AUTO_SELECT_OPTION_SYMBOLS and (not strike_locked_after_first_trade):
+            if AUTO_SELECT_OPTION_SYMBOLS and (not strike_locked_after_first_trade) and (not lock_symbols_during_open):
                 _refresh_interval = timedelta(minutes=max(1, safe_int(AUTO_SELECT_REFRESH_INTERVAL_MINUTES, 5)))
                 _refresh_due = (
                     last_symbol_refresh_ts is None
@@ -4922,7 +4971,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                                                     _remaining_spot.sort_values("spot_ts"),
                                                     _ce_new.sort_values("ce_ts"),
                                                     left_on="spot_ts", right_on="ce_ts",
-                                                    direction="nearest", tolerance=pd.Timedelta("2min"),
+                                                    direction="backward", tolerance=pd.Timedelta("2min"),
                                                 )
                                                 _ce_merged = _ce_merged.set_index(_remaining_spot.index)
                                                 for _c in ["ce_ts", "ce_open", "ce_high", "ce_low", "ce_close", "ce_volume"]:
@@ -4939,7 +4988,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                                                     _remaining_spot.sort_values("spot_ts"),
                                                     _pe_new.sort_values("pe_ts"),
                                                     left_on="spot_ts", right_on="pe_ts",
-                                                    direction="nearest", tolerance=pd.Timedelta("2min"),
+                                                    direction="backward", tolerance=pd.Timedelta("2min"),
                                                 )
                                                 _pe_merged = _pe_merged.set_index(_remaining_spot.index)
                                                 for _c in ["pe_ts", "pe_open", "pe_high", "pe_low", "pe_close", "pe_volume"]:
@@ -4950,6 +4999,11 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                     except Exception as _ref_exc:
                         pass
                     last_symbol_refresh_ts = ts
+
+                    # The refresh can overwrite the current row with candles
+                    # for the newly selected option symbols. Re-read it so the
+                    # signal uses the active symbol's price, not the stale row.
+                    row = day.iloc[i]
 
             if ts >= no_new_entry_after_ts:
                 day.loc[i, "guard_status"] = "NO_NEW_ENTRY_CUTOFF"

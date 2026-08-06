@@ -1,0 +1,12 @@
+kiteconnect
+certifi
+pandas
+numpy
+python-dateutil
+pytz
+openpyxl
+jupyter
+jupyterlab
+matplotlib
+truststore
+flask
