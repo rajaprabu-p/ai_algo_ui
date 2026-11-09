@@ -8,7 +8,7 @@ settings in the UI never breaks these tests.
     venv\\Scripts\\python.exe -m unittest discover -s scripts\\tests -v      (also runs the 2-minute snapshot)
 """
 
-import importlib
+import importlib.util
 import math
 import os
 import sys
@@ -27,11 +27,27 @@ for path in (str(SCRIPTS_DIR), str(TESTS_DIR / "fake_kite")):
 os.environ.setdefault("FAKE_KITE_SPOT_DIR", str(TESTS_DIR / "fixtures" / "spot"))
 
 MODULES = {}
+ENGINE_PATH = SCRIPTS_DIR / "strategy" / "engine.py"
+
+
+def load_engine(variant: str):
+    """Load a private copy of strategy/engine.py configured for one variant.
+
+    The engine reads its variant once at import, so each variant gets its own
+    module object (engine_v28, engine_v30) and both can be tested side by side.
+    """
+    from strategy import runtime
+
+    runtime.configure(variant=variant, argv=[])
+    spec = importlib.util.spec_from_file_location(f"engine_{variant}", ENGINE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def setUpModule():
-    for name in ("v28_strategy_main", "v30_strategy_main"):
-        MODULES[name] = importlib.import_module(name)
+    for variant in ("v28", "v30"):
+        MODULES[variant] = load_engine(variant)
 
 
 class StrategyTestCase(unittest.TestCase):
@@ -41,6 +57,45 @@ class StrategyTestCase(unittest.TestCase):
         for name, module in MODULES.items():
             with self.subTest(variant=name):
                 yield module
+
+
+class VariantSettingsTests(unittest.TestCase):
+    """The only settings that differ between variants (strategy/variants/*.py)."""
+
+    def test_v28(self):
+        m = MODULES["v28"]
+        self.assertEqual(m.LOG_IDENTIFIER, "v28")
+        self.assertEqual(m.ENTRY_SCORE_THRESHOLD, 5)
+        self.assertEqual(m.TRAILING_PROFIT_STAGE1[0], (30, 10))
+        self.assertEqual(m.TRAILING_PROFIT_STAGE2[0], (25, 20))
+        self.assertIsNot(m.TRAILING_PROFIT_STAGE1, m.TRAILING_PROFIT_STAGE2)
+
+    def test_v30(self):
+        m = MODULES["v30"]
+        self.assertEqual(m.LOG_IDENTIFIER, "v30")
+        self.assertEqual(m.ENTRY_SCORE_THRESHOLD, 4)
+        self.assertEqual(m.TRAILING_PROFIT_STAGE1[:2], [(25, 15), (30, 20)])
+        self.assertEqual(len(m.TRAILING_PROFIT_STAGE1), 16)
+        # Same list object on purpose: the engine compares ladders with `is`.
+        self.assertIs(m.TRAILING_PROFIT_STAGE1, m.TRAILING_PROFIT_STAGE2)
+
+    def test_shared_settings_identical(self):
+        differing = {"LOG_IDENTIFIER", "ENTRY_SCORE_THRESHOLD", "TRAILING_PROFIT_STAGE1", "TRAILING_PROFIT_STAGE2", "_VARIANT", "_cli"}
+        a, b = vars(MODULES["v28"]), vars(MODULES["v30"])
+        for key in sorted(set(a) - differing):
+            value = a[key]
+            if key.startswith("__") or callable(value) or isinstance(value, type(os)):
+                continue
+            with self.subTest(setting=key):
+                self.assertEqual(repr(value), repr(b[key]))
+
+    def test_unknown_variant_rejected(self):
+        from strategy import variants
+
+        with self.assertRaises(ValueError):
+            variants.load("../evil")
+        with self.assertRaises(ModuleNotFoundError):
+            variants.load("v99")
 
 
 LADDER_S1 = [(30, 10), (50, 45), (60, 55)]
