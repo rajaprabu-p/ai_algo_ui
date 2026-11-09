@@ -61,6 +61,22 @@ python app.py
 
 4. Open the UI in browser at `http://<ec2-public-ip>:5000`.
 
+## Deploying code updates (FileZilla)
+
+Strategy logic lives in `scripts/strategy/` (`engine.py` plus per-variant settings in
+`variants/`); `scripts/v28_strategy_main.py` and `scripts/v30_strategy_main.py` are small launchers.
+
+1. On your PC, after the last code change: `venv\Scripts\python.exe scripts\make_manifest.py`
+2. Stop the strategy on the server (outside market hours).
+3. In FileZilla, upload the **whole `scripts/strategy/` folder** (it includes `MANIFEST.json`) and
+   overwrite. Also upload the launchers, `scripts/editable_config.py` or `app.py`/`templates/` if they changed.
+4. Start the app and check the strategy log for `[DEPLOY CHECK] version=..., N files OK`.
+
+If a file is missing, out of date, or a leftover file is found, the log lists it and
+**LIVE_ORDER refuses to start** (paper and backtest only warn). FileZilla never deletes
+files on the server, so remove leftovers by hand. Emergency override: `SKIP_DEPLOY_CHECK=1` in `.env`.
+`scripts/tests/` is not needed on the server.
+
 Notes:
 - The UI writes `strategy.log` and `strategy.pid` next to the scripts.
 - Strategy run logs are written to `STRATEGY_LOG_DIR` when set, or to the repository's `logs/` directory by default. For persistent Azure or Vultr storage, create a writable directory and set `STRATEGY_LOG_DIR=/var/log/rpalgo` in `.env` before starting the app:

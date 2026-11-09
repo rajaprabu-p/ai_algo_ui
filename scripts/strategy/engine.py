@@ -16,7 +16,7 @@ import signal
 import threading
 from typing import List, Dict, Optional
 from editable_config import load_editable_config
-from strategy import runtime, variants
+from strategy import deploy_check, runtime, variants
 import sys
 import os
 import io
@@ -7428,6 +7428,9 @@ def main() -> None:
         if not acquire_live_process_lock(RUN_MODE):
             raise SystemExit(0)
         emit_startup_banner()
+        # Files on disk must match MANIFEST.json (written by make_manifest.py before
+        # upload); LIVE_ORDER refuses to start on a partial/stale deploy.
+        deploy_check.verify_or_exit(RUN_MODE)
         print("Connecting to Kite...")
         kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(ACCESS_TOKEN)
