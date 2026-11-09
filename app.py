@@ -1606,6 +1606,102 @@ def api_weekly_options_file_delete():
     return jsonify({"ok": not failed, "deleted": deleted, "failed": failed})
 
 
+# Written by the cron job: scripts/daily_download.py >> logs/daily_download.log
+DAILY_DOWNLOAD_LOG = os.environ.get("DAILY_DOWNLOAD_LOG") or os.path.join(WORKDIR, "logs", "daily_download.log")
+_DD_LINE_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) IST\] (.*)$")
+_DD_RUNNING_GRACE_SECONDS = 20 * 60
+
+
+def parse_daily_download_log(text: str) -> dict:
+    """Summarise runs in logs/daily_download.log (output of scripts/daily_download.py).
+
+    Each run starts with "[<ts> IST] daily download for <date> ...". Status of a run:
+    OK, FAILED, LOGIN_FAILED, SKIPPED (weekend / market still open), DRY_RUN, or
+    INCOMPLETE (no closing line: still running, or the process died).
+    """
+    runs = []
+    current = None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        match = _DD_LINE_RE.match(line)
+        message = match.group(2) if match else line
+        if match and message.startswith("daily download for "):
+            current = {
+                "trade_date": message.split()[3], "started_at": match.group(1), "finished_at": match.group(1),
+                "status": "INCOMPLETE", "detail": "", "expiries": "", "saved": [], "skipped": [], "errors": [], "notes": [],
+            }
+            runs.append(current)
+            continue
+        if current is None:
+            continue
+        if match:
+            current["finished_at"] = match.group(1)
+        if message.startswith("nearest expiries: "):
+            current["expiries"] = message[len("nearest expiries: "):]
+        elif message.startswith(("Saved ", "Added ")):
+            current["saved"].append(message)
+        elif message.startswith("SKIP existing file: "):
+            current["skipped"].append(message[len("SKIP existing file: "):])
+        elif message.startswith("ERROR:"):
+            current["errors"].append(message)
+            if "Kite login failed" in message or "ACCESS_TOKEN missing" in message:
+                current["status"], current["detail"] = "LOGIN_FAILED", message
+        elif "contract request errors saved to" in message or message.startswith("INCOMPLETE ("):
+            current["errors"].append(message)
+        elif message.startswith("No candles returned for "):
+            current["notes"].append(message + " (market holiday?)")
+        elif match and message.startswith(("weekend:", "market not closed")):
+            current["status"], current["detail"] = "SKIPPED", message
+        elif match and message.startswith("dry run"):
+            current["status"], current["detail"] = "DRY_RUN", message
+        elif match and message == "done":
+            current["status"] = "FAILED" if current["errors"] else "OK"
+            current["detail"] = message
+        elif match and message.startswith("done with "):
+            current["status"], current["detail"] = "FAILED", message
+    last_ok = next((r for r in reversed(runs) if r["status"] == "OK"), None)
+    return {"runs": len(runs), "last": runs[-1] if runs else None, "last_ok": last_ok}
+
+
+@app.route("/api/daily-download/status")
+def api_daily_download_status():
+    log_path = DAILY_DOWNLOAD_LOG
+    if not os.path.isfile(log_path):
+        return jsonify({
+            "ok": True, "found": False, "log_path": log_path,
+            "msg": "No daily download log yet. Set up the cron job (scripts/daily_download.py) or wait for its first run.",
+        })
+    size = os.path.getsize(log_path)
+    with open(log_path, "rb") as handle:
+        handle.seek(max(0, size - 256 * 1024))  # last 256 KB is plenty for recent runs
+        text = handle.read().decode("utf-8", errors="replace")
+    summary = parse_daily_download_log(text)
+    last = summary["last"]
+    log_age_seconds = int(time.time() - os.path.getmtime(log_path))
+    if last and last["status"] == "INCOMPLETE" and log_age_seconds < _DD_RUNNING_GRACE_SECONDS:
+        last["status"], last["detail"] = "RUNNING", "download in progress (log updated recently)"
+
+    files, error_files = [], []
+    if last:
+        daily_dir = os.path.join(WORKDIR, "data", "nifty_options", "daily")
+        suffix = f"_{last['trade_date']}"
+        if os.path.isdir(daily_dir):
+            for name in sorted(os.listdir(daily_dir)):
+                path = os.path.join(daily_dir, name)
+                if name.startswith("nifty_weekly_") and name.endswith(f"{suffix}.csv"):
+                    files.append({"file": name, "size_mb": round(os.path.getsize(path) / (1024 * 1024), 2)})
+                elif name.startswith("errors_") and name.endswith(f"{suffix}.txt"):
+                    error_files.append(name)
+
+    tail_lines = [line for line in text.splitlines() if line.strip()][-40:]
+    return jsonify({
+        "ok": True, "found": True, "log_path": log_path, "log_updated_seconds_ago": log_age_seconds,
+        "runs_in_log": summary["runs"], "last": last,
+        "last_ok": {k: summary["last_ok"][k] for k in ("trade_date", "finished_at")} if summary["last_ok"] else None,
+        "files": files, "error_files": error_files, "tail": tail_lines,
+    })
+
+
 @app.route('/api/log-files')
 def api_log_files():
     if not session.get("logged_in"):

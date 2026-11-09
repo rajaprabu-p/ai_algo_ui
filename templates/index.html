@@ -393,6 +393,27 @@
       </div>
     </details>
 
+    <details id="daily-download-status-section" class="section" open>
+      <summary>Daily Download Status (automatic)</summary>
+      <div class="section-body">
+        <div class="card">
+          <div>
+            <button id="refresh-daily-download-status">Refresh</button>
+            <span id="daily-download-badge" style="margin-left:0.8rem;padding:0.15rem 0.6rem;border-radius:0.4rem;font-weight:700"></span>
+            <span id="daily-download-summary" style="margin-left:0.6rem"></span>
+          </div>
+          <div id="daily-download-details" style="margin-top:0.6rem;font-size:0.92rem"></div>
+          <div style="margin-top:0.3rem;color:#475569;font-size:0.85rem">
+            Runs automatically Mon&ndash;Fri at 16:00 and 21:00 IST (cron on the server). Needs that day's Kite ACCESS_TOKEN.
+          </div>
+          <details style="margin-top:0.6rem">
+            <summary style="cursor:pointer">Last log lines</summary>
+            <pre id="daily-download-log">(no log)</pre>
+          </details>
+        </div>
+      </div>
+    </details>
+
     <details class="section" open>
       <summary>EDITABLE CONFIGURATION</summary>
       <div class="section-body">
@@ -1101,6 +1122,73 @@
           return item;
         }));
         document.getElementById('weekly-options-files-info').textContent = 'Found ' + j.files.length + ' CSV file(s).';
+      }
+
+      const DAILY_DOWNLOAD_BADGES = {
+        OK: ['Last run OK', '#dcfce7', '#166534'],
+        FAILED: ['Last run FAILED', '#fee2e2', '#b91c1c'],
+        LOGIN_FAILED: ['Kite login failed', '#fee2e2', '#b91c1c'],
+        RUNNING: ['Running', '#fef3c7', '#92400e'],
+        INCOMPLETE: ['Incomplete', '#fef3c7', '#92400e'],
+        SKIPPED: ['Skipped', '#e2e8f0', '#334155'],
+        DRY_RUN: ['Dry run', '#e2e8f0', '#334155'],
+        NONE: ['Not set up yet', '#e2e8f0', '#334155'],
+      };
+
+      function addDailyDownloadLine(container, label, value, color){
+        const row = document.createElement('div');
+        const strong = document.createElement('strong');
+        strong.textContent = label + ': ';
+        const span = document.createElement('span');
+        span.textContent = value;
+        if(color) span.style.color = color;
+        row.append(strong, span);
+        container.appendChild(row);
+      }
+
+      async function loadDailyDownloadStatus(){
+        const badge = document.getElementById('daily-download-badge');
+        const summary = document.getElementById('daily-download-summary');
+        const details = document.getElementById('daily-download-details');
+        const logEl = document.getElementById('daily-download-log');
+        details.replaceChildren();
+        let j;
+        try {
+          const r = await fetch('/api/daily-download/status');
+          j = await r.json();
+          if(!r.ok || !j.ok) throw new Error(j.msg || ('HTTP ' + r.status));
+        } catch(error) {
+          badge.textContent = 'Error'; badge.style.background = '#fee2e2'; badge.style.color = '#b91c1c';
+          summary.textContent = 'Unable to read daily download status: ' + error.message;
+          return;
+        }
+        const last = j.found ? j.last : null;
+        const key = last ? last.status : 'NONE';
+        const [label, bg, fg] = DAILY_DOWNLOAD_BADGES[key] || [key, '#e2e8f0', '#334155'];
+        badge.textContent = label; badge.style.background = bg; badge.style.color = fg;
+        if(!j.found){
+          summary.textContent = j.msg || 'No log yet.';
+          logEl.textContent = '(no log at ' + j.log_path + ')';
+          return;
+        }
+        if(!last){
+          summary.textContent = 'Log exists but contains no runs yet.';
+        } else {
+          summary.textContent = 'Trade date ' + last.trade_date + ', last run ' + last.finished_at + ' IST';
+          if(last.expiries) addDailyDownloadLine(details, 'Expiries', last.expiries);
+          if(last.detail && key !== 'OK') addDailyDownloadLine(details, 'Result', last.detail, fg);
+          const fileText = j.files.length
+            ? j.files.map(f => f.file + ' (' + f.size_mb.toFixed(2) + ' MB)').join(', ')
+            : 'none for this date';
+          addDailyDownloadLine(details, 'Files for ' + last.trade_date, fileText, j.files.length ? '' : '#b91c1c');
+          if(j.error_files.length) addDailyDownloadLine(details, 'Incomplete (will retry next run)', j.error_files.join(', '), '#b91c1c');
+          last.errors.forEach(message => addDailyDownloadLine(details, 'Error', message, '#b91c1c'));
+          last.notes.forEach(message => addDailyDownloadLine(details, 'Note', message, '#92400e'));
+        }
+        if(j.last_ok && (!last || last.status !== 'OK')){
+          addDailyDownloadLine(details, 'Last successful run', j.last_ok.trade_date + ' (finished ' + j.last_ok.finished_at + ' IST)');
+        }
+        logEl.textContent = (j.tail || []).join('\n') || '(log is empty)';
       }
 
       async function downloadWeeklyOptionsFile(){
@@ -2279,6 +2367,7 @@
       document.getElementById('weekly-options-files-expiry').addEventListener('change', async () => { await loadWeeklyOptionsFiles(); });
       document.getElementById('download-weekly-options-file').addEventListener('click', async () => { await downloadWeeklyOptionsFile(); });
       document.getElementById('delete-weekly-options-files').addEventListener('click', async () => { await deleteWeeklyOptionsFiles(); });
+      document.getElementById('refresh-daily-download-status').addEventListener('click', async () => { await loadDailyDownloadStatus(); });
       document.getElementById('stop-weekly-options-download').addEventListener('click', async () => { await stopWeeklyOptionsDownload(); });
       document.getElementById('refresh-weekly-options-download').addEventListener('click', async () => {
         await statusWeeklyOptionsDownload();
@@ -2440,7 +2529,8 @@
         const liveOrderSection = document.getElementById('live-order-runner-section');
         liveOrderSection.after(
           document.getElementById('weekly-options-download-section'),
-          document.getElementById('weekly-options-files-section')
+          document.getElementById('weekly-options-files-section'),
+          document.getElementById('daily-download-status-section')
         );
         const today = localDateString();
         document.getElementById('gap-from-date').value = today;
@@ -2459,6 +2549,7 @@
         await includeDownloadedWeeklyOptionExpiries('weekly-options-expiry-date');
         await includeDownloadedWeeklyOptionExpiries('weekly-options-files-expiry');
         await loadWeeklyOptionsFiles();
+        try { await loadDailyDownloadStatus(); } catch(error) { console.error(error); }
         updateConsolidateButtonState();
         try { await loadEditableConfig(); } catch(error) {
           const statusEl = document.getElementById('editable-config-status');
