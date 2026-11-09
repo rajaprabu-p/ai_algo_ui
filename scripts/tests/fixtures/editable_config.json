@@ -1,0 +1,11 @@
+{
+  "TRACKING_START": "09:15",
+  "NO_NEW_ENTRY_AFTER": "12:00",
+  "FORCE_EXIT": "14:50",
+  "MTF_MODE": "MANUAL",
+  "MTF_INTERVAL": "5min",
+  "MTF_STRICTNESS": 1,
+  "FIXED_SL_POINTS": 25,
+  "MAX_TRADES": 2,
+  "ENABLE_MFE_EXIT": true
+}

@@ -15,9 +15,12 @@ os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 ssl._create_default_https_context = ssl.create_default_context
 
-def load_env_file(env_path: str = None) -> None:
+def load_env_file(env_path: str = None, override: bool = True) -> None:
     if env_path is None:
-        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_env = os.path.join(os.path.dirname(script_dir), ".env")
+        script_env = os.path.join(script_dir, ".env")
+        env_path = project_env if os.path.exists(project_env) else script_env
     if not os.path.exists(env_path):
         return
     with open(env_path, "r", encoding="utf-8") as f:
@@ -29,7 +32,7 @@ def load_env_file(env_path: str = None) -> None:
             # Handle UTF-8 BOM on first key so API_KEY is loaded correctly.
             key = key.strip().lstrip("\ufeff")
             value = value.strip().strip('"').strip("'")
-            if key:
+            if key and (override or key not in os.environ):
                 os.environ[key] = value
 
 
@@ -59,7 +62,10 @@ def generate_access_token():
         print(f"Access Token: {access_token}")
 
         # Auto-save to .env
-        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_env = os.path.join(os.path.dirname(script_dir), ".env")
+        script_env = os.path.join(script_dir, ".env")
+        env_path = project_env if os.path.exists(project_env) else script_env
         if os.path.exists(env_path):
             with open(env_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()

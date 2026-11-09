@@ -10,3 +10,4 @@ jupyterlab
 matplotlib
 truststore
 flask
+gunicorn

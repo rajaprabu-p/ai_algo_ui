@@ -10,9 +10,12 @@ truststore.inject_into_ssl()
 
 from kiteconnect import KiteConnect
 
-def load_env_file(env_path: str = None) -> None:
+def load_env_file(env_path: str = None, override: bool = False) -> None:
     if env_path is None:
-        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_env = os.path.join(os.path.dirname(script_dir), ".env")
+        script_env = os.path.join(script_dir, ".env")
+        env_path = project_env if os.path.exists(project_env) else script_env
     if not os.path.exists(env_path):
         return
     with open(env_path, "r", encoding="utf-8") as f:
@@ -24,13 +27,14 @@ def load_env_file(env_path: str = None) -> None:
             # Handle UTF-8 BOM on first key so API_KEY is loaded correctly.
             key = key.strip().lstrip("\ufeff")
             value = value.strip().strip('"').strip("'")
-            if key:
+            if key and (override or key not in os.environ):
                 os.environ[key] = value
 
 
 load_env_file()
 
 def get_kite():
+    load_env_file(override=True)
     api_key = os.getenv("API_KEY")
     access_token = os.getenv("ACCESS_TOKEN")
     if not api_key or not access_token:
