@@ -3,11 +3,25 @@
 # so the dashboard shows "Skipped" instead of "Kite login failed".
 #
 # Format: one date per line, YYYY-MM-DD, optional comment after #.
-# Add the rest of the year from NSE's official holiday calendar
+# Source: NSE official trading holiday list
 # (nseindia.com -> Resources -> Exchange Communication -> Holidays).
-# Upload this file to the server's scripts/ folder after editing.
+# Add next year's list when NSE publishes it, then upload this file
+# to the server's scripts/ folder.
 
-# Confirmed from data (Kite returned no candles on these weekdays):
-2026-10-02  # Gandhi Jayanti
-2026-10-20  # weekly expiry moved to 19 Oct
-2026-11-10  # weekly expiry moved to 9 Nov
+# 2026
+2026-01-15  # Municipal Corporation Election - Maharashtra
+2026-01-26  # Republic Day
+2026-03-03  # Holi
+2026-03-26  # Shri Ram Navami
+2026-03-31  # Shri Mahavir Jayanti
+2026-04-03  # Good Friday
+2026-04-14  # Dr. Baba Saheb Ambedkar Jayanti
+2026-05-01  # Maharashtra Day
+2026-05-28  # Bakri Id
+2026-06-26  # Muharram
+2026-09-14  # Ganesh Chaturthi
+2026-10-02  # Mahatma Gandhi Jayanti
+2026-10-20  # Dussehra
+2026-11-10  # Diwali-Balipratipada
+2026-11-24  # Prakash Gurpurb Sri Guru Nanak Dev
+2026-12-25  # Christmas
