@@ -1,11 +1,15 @@
 """Daily NIFTY option candle download for backtesting (run after market close).
 
-Each trading day it downloads 1-minute candles for the NEAREST NIFTY option
-expiries from today onward (default 2). That automatically covers:
-  * normal days     -> this week's expiry + next week's
-  * expiry days     -> the contract expiring today + next week's
-  * monthly weeks   -> the monthly contract (the downloader's own `week`/`all`
-                       modes skip monthly expiries; this wrapper does not)
+Each trading day it downloads 1-minute candles for the NIFTY option expiries
+the strategy and its backtests use:
+  * normal days     -> the current (nearest) expiry only
+  * expiry days     -> the contract expiring today + the next expiry
+                       (the next one is what the old "skip same-day expiry"
+                       rule traded, so both rules can be backtested)
+  * monthly weeks   -> the monthly contract when it is the nearest (the
+                       downloader's own `week`/`all` modes skip monthly
+                       expiries; this wrapper does not)
+Use --expiries N to download the N nearest expiries every day instead.
 
 It wraps scripts/nifty_weekly_options_daily_files_only.py (one run per expiry,
 --expiry-date mode), so files land in data/nifty_options/daily/ as usual and
@@ -126,7 +130,8 @@ def prune_instrument_archives() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--date", help="Trading date YYYY-MM-DD (default: today IST)")
-    parser.add_argument("--expiries", type=int, default=2, help="How many nearest expiries to download (default 2)")
+    parser.add_argument("--expiries", type=int, default=None,
+                        help="Download the N nearest expiries every day (default: 1 on normal days, 2 on expiry days)")
     parser.add_argument("--dry-run", action="store_true", help="Only print the expiries it would download")
     parser.add_argument("--force", action="store_true",
                         help="Run even before 15:45 IST or on a date listed in scripts/market_holidays.txt")
@@ -166,7 +171,13 @@ def main() -> int:
         return 2
 
     try:
-        expiries = nearest_expiries(kite, trade_day, max(1, args.expiries))
+        if args.expiries is not None:
+            expiries = nearest_expiries(kite, trade_day, max(1, args.expiries))
+        else:
+            # Current expiry only, plus the next one when the current expires today.
+            expiries = nearest_expiries(kite, trade_day, 2)
+            if expiries and expiries[0] != trade_day:
+                expiries = expiries[:1]
     except Exception as exc:
         log(f"ERROR: could not read the NFO instrument list: {exc}")
         return 1
