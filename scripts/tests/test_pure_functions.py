@@ -253,6 +253,43 @@ class SymbolHelperTests(StrategyTestCase):
             self.assertEqual(m.safe_int(None, 4), 4)
 
 
+class EntryDiagnosticsDedupeTests(StrategyTestCase):
+    def capture(self, m, rebuilds, dedupe=True):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with mock.patch.object(m, "ENTRY_DIAGNOSTICS_DEDUPE", dedupe), \
+                mock.patch.object(m, "_ENTRY_DIAG_SEEN", set()), contextlib.redirect_stdout(out):
+            for lines in rebuilds:
+                for line in lines:
+                    m.print_entry_diag(line)
+        return out.getvalue().splitlines()
+
+    def test_live_rebuilds_print_each_candle_once(self):
+        # Each live rebuild replays the whole day so far, plus one new candle.
+        rebuilds = [
+            ["[ENTRY PARITY] spot_ts=09:20 bull=0"],
+            ["[ENTRY PARITY] spot_ts=09:20 bull=0", "[ENTRY PARITY] spot_ts=09:21 bull=4"],
+            ["[ENTRY PARITY] spot_ts=09:20 bull=0", "[ENTRY PARITY] spot_ts=09:21 bull=4", "[ENTRY BLOCK] premium=288.90 time=09:22"],
+        ]
+        for m in self.each_module():
+            self.assertEqual(self.capture(m, rebuilds), [
+                "[ENTRY PARITY] spot_ts=09:20 bull=0",
+                "[ENTRY PARITY] spot_ts=09:21 bull=4",
+                "[ENTRY BLOCK] premium=288.90 time=09:22",
+            ])
+
+    def test_changed_values_print_again(self):
+        for m in self.each_module():
+            lines = self.capture(m, [["[ENTRY PARITY] spot_ts=09:20 bull=3"], ["[ENTRY PARITY] spot_ts=09:20 bull=4"]])
+            self.assertEqual(len(lines), 2)
+
+    def test_dedupe_can_be_turned_off(self):
+        for m in self.each_module():
+            self.assertEqual(len(self.capture(m, [["x"], ["x"]], dedupe=False)), 2)
+
+
 class GiftNiftyTests(StrategyTestCase):
     class OkKite:
         def __init__(self):

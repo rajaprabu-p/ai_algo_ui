@@ -233,6 +233,24 @@ TICK_STALL_RECONNECT_COOLDOWN_SECONDS = 120
 IDLE_STATUS_INTERVAL_SECONDS = 30
 OPEN_PNL_LOG_INTERVAL_SECONDS = 30
 ENTRY_DIAGNOSTICS = True
+# Live modes rebuild the whole day on every completed minute, which re-ran the
+# per-candle [ENTRY PARITY]/[ENTRY BLOCK] prints for every past candle and
+# repeated the same lines in the log dozens of times. With dedupe on, each
+# identical line prints once; a line whose values changed prints again.
+ENTRY_DIAGNOSTICS_DEDUPE = True
+_ENTRY_DIAG_SEEN: set = set()
+_ENTRY_DIAG_SEEN_MAX = 50000  # safety cap (~3 lines/minute in a normal session)
+
+
+def print_entry_diag(message: str) -> None:
+    """Print a per-candle entry diagnostic once per process (see ENTRY_DIAGNOSTICS_DEDUPE)."""
+    if ENTRY_DIAGNOSTICS_DEDUPE:
+        if message in _ENTRY_DIAG_SEEN:
+            return
+        if len(_ENTRY_DIAG_SEEN) >= _ENTRY_DIAG_SEEN_MAX:
+            _ENTRY_DIAG_SEEN.clear()
+        _ENTRY_DIAG_SEEN.add(message)
+    print(message)
 
 # GIFT Nifty context (log only — never blocks an entry).
 # PAPERTRADE_LIVE / LIVE_ORDER fetch a GIFT Nifty quote at each fresh BUY and
@@ -6539,7 +6557,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                 or mtf_trend == -1
             ):
                 mtf_label = {1: "BULLISH_5M", -1: "BEARISH_5M", 0: "NEUTRAL_5M"}[mtf_trend]
-                print(
+                print_entry_diag(
                     f"[ENTRY PARITY] mode={run_mode} spot_ts={ts} mtf_ts={row.get('mtf_ts')} "
                     f"ce_ts={row.get('ce_ts')} pe_ts={row.get('pe_ts')} "
                     f"spot={safe_float(row.get('spot_close'), 0.0):.2f} "
@@ -6551,7 +6569,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                     f"threshold={ENTRY_SCORE_THRESHOLD}"
                 )
             if ENTRY_DIAGNOSTICS and mtf_trend == 1 and bull_score >= ENTRY_SCORE_THRESHOLD and not (ce_confirm and allow_ce_entries):
-                print(
+                print_entry_diag(
                     f"[ENTRY BLOCK] mode={run_mode} spot_ts={ts} side=CE "
                     f"reason={'CE_CONFIRM_FALSE' if not ce_confirm else 'CE_DISABLED_BY_CONFIG'} "
                     f"bull_score={bull_score} ce_confirm={ce_confirm} allow_ce={allow_ce_entries} "
@@ -6607,7 +6625,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                 last_pe_prev_close = safe_float(row.get("pe_close"), float("nan"))
                 day.loc[i, "guard_status"] = "ENTRY_PREMIUM_TOO_HIGH"
                 if ENTRY_DIAGNOSTICS:
-                    print(
+                    print_entry_diag(
                         f"[ENTRY BLOCK] premium={candidate_premium:.2f} "
                         f"limit={safe_float(MAX_ENTRY_PREMIUM, 0.0):.2f} "
                         f"side={'CE' if mtf_trend == 1 else 'PE'} time={ts}"
