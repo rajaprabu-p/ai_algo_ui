@@ -2381,7 +2381,7 @@ def api_kite_account_summary():
         return jsonify({"ok": False, "msg": "Unauthorized"}), 401
 
     try:
-        from login import get_kite
+        from scripts.login import get_kite
         kite = get_kite()
 
         profile = kite.profile() or {}
