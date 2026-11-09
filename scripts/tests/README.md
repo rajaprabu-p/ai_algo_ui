@@ -12,7 +12,18 @@ venv\Scripts\python.exe scripts\tests\snapshot.py
 It ends with `48/48 passed`. Any `FAIL` line shows which trades changed, and
 the temp workspace (one `console.log` and Excel per run) is kept for inspection.
 
-## What it covers
+## Unit tests (about 20 seconds)
+
+```powershell
+venv\Scripts\python.exe -m unittest discover -s scripts\tests -p "test_pure_functions.py" -v
+```
+
+Small checks on trailing stops, entry stop price, gap policy, CPR, strike parsing
+and the GIFT Nifty helper, run for both v28 and v30. Settings are pinned inside
+the tests, so UI changes don't break them. Run everything (unit + snapshot) with
+`venv\Scripts\python.exe -m unittest discover -s scripts\tests -v`.
+
+## What the snapshot covers
 
 - v28 and v30, 24 trading days (5 Oct – 6 Nov 2026), BACKTEST mode, DOWNLOADED option data.
 - Settings pinned by `fixtures/editable_config.json` (changing the UI settings does not affect the test).

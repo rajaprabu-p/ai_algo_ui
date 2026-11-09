@@ -100,7 +100,9 @@ _cli.add_argument(
     help="Backtest option candle source (overrides BACKTEST_OPTION_DATA_SOURCE)",
 )
 _cli.add_argument("--after-hours-replay", action="store_true", help="Allow PAPERTRADE_LIVE to replay the completed day after market close")
-_cli_args, _ = _cli.parse_known_args()
+# Only read the command line when run as a script, so importing this module
+# (e.g. from unit tests) does not treat the importer's arguments as a trade date.
+_cli_args, _ = _cli.parse_known_args(None if __name__ == "__main__" else [])
 # positional arg wins if --date not supplied
 if _cli_args.date is None and _cli_args.date_pos is not None:
     _cli_args.date = _cli_args.date_pos
@@ -7410,264 +7412,273 @@ def emit_startup_banner() -> None:
 # =========================
 RUN_MODE = normalize_run_mode(RUN_MODE)
 
-try:
-    if not acquire_live_process_lock(RUN_MODE):
-        raise SystemExit(0)
-    emit_startup_banner()
-    print("Connecting to Kite...")
-    kite = KiteConnect(api_key=API_KEY)
-    kite.set_access_token(ACCESS_TOKEN)
-    validate_kite_login_on_start(kite, RUN_MODE)
+def main() -> None:
+    # These are read as module globals elsewhere: CE_SYMBOL/PE_SYMBOL by
+    # run_single_day_test and _build_chart_bytes, kite via globals().get("kite")
+    # in run_single_day_test's strike switching.
+    global CE_SYMBOL, PE_SYMBOL, kite
+    try:
+        if not acquire_live_process_lock(RUN_MODE):
+            raise SystemExit(0)
+        emit_startup_banner()
+        print("Connecting to Kite...")
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(ACCESS_TOKEN)
+        validate_kite_login_on_start(kite, RUN_MODE)
 
-    print(f"Running mode: {RUN_MODE}")
-    print_live_order_preflight()
+        print(f"Running mode: {RUN_MODE}")
+        print_live_order_preflight()
 
-    if AUTO_SELECT_OPTION_SYMBOLS:
-        if RUN_MODE in {"PAPERTRADE_LIVE", "LIVE_ORDER"}:
-            now_ist = datetime.now(IST)
-            if now_ist.weekday() < 5:
-                market_open_today = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
-                market_close_today = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-                if now_ist < market_open_today:
-                    print("Live mode + auto-select: waiting for market open before resolving ATM symbols...")
-                    now_ist = wait_until_market_open(check_interval_seconds=30)
-                elif now_ist > market_close_today:
-                    print("Live mode + auto-select: market already closed; resolving symbols with current spot snapshot.")
-
-            print("Auto-selecting ATM CE/PE symbols...")
-            print(f"Using underlying token: {UNDERLYING_TOKEN}")
-            live_ref_trade_date = str(_cli_args.date or now_ist.strftime("%Y-%m-%d"))
-
-            spot_ltp = 0.0
+        if AUTO_SELECT_OPTION_SYMBOLS:
             if RUN_MODE in {"PAPERTRADE_LIVE", "LIVE_ORDER"}:
-                try:
-                    spot_ref_df = fetch_history(kite, UNDERLYING_TOKEN, live_ref_trade_date, BASE_INTERVAL)
-                    if not spot_ref_df.empty:
-                        ref = str(AUTO_SELECT_SPOT_REF or "").lower()
-                        if ref == "open" and "open" in spot_ref_df.columns:
-                            spot_ltp = float(spot_ref_df["open"].dropna().iloc[0])
-                        elif ref == "last":
-                            if "last_price" in spot_ref_df.columns and not spot_ref_df["last_price"].dropna().empty:
-                                spot_ltp = float(spot_ref_df["last_price"].dropna().iloc[-1])
-                            elif "close" in spot_ref_df.columns and not spot_ref_df["close"].dropna().empty:
-                                spot_ltp = float(spot_ref_df["close"].dropna().iloc[-1])
-                        elif len(ref) == 5 and ref.count(":") == 1:
-                            _hh, _mm = [int(x) for x in ref.split(":")]
-                            _ts = pd.to_datetime(spot_ref_df["ts"], errors="coerce") if "ts" in spot_ref_df.columns else pd.Series([], dtype="datetime64[ns]")
-                            if not _ts.empty:
-                                if getattr(_ts.dt, "tz", None) is None:
-                                    _ts = _ts.dt.tz_localize(IST)
+                now_ist = datetime.now(IST)
+                if now_ist.weekday() < 5:
+                    market_open_today = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+                    market_close_today = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+                    if now_ist < market_open_today:
+                        print("Live mode + auto-select: waiting for market open before resolving ATM symbols...")
+                        now_ist = wait_until_market_open(check_interval_seconds=30)
+                    elif now_ist > market_close_today:
+                        print("Live mode + auto-select: market already closed; resolving symbols with current spot snapshot.")
+
+                print("Auto-selecting ATM CE/PE symbols...")
+                print(f"Using underlying token: {UNDERLYING_TOKEN}")
+                live_ref_trade_date = str(_cli_args.date or now_ist.strftime("%Y-%m-%d"))
+
+                spot_ltp = 0.0
+                if RUN_MODE in {"PAPERTRADE_LIVE", "LIVE_ORDER"}:
+                    try:
+                        spot_ref_df = fetch_history(kite, UNDERLYING_TOKEN, live_ref_trade_date, BASE_INTERVAL)
+                        if not spot_ref_df.empty:
+                            ref = str(AUTO_SELECT_SPOT_REF or "").lower()
+                            if ref == "open" and "open" in spot_ref_df.columns:
+                                spot_ltp = float(spot_ref_df["open"].dropna().iloc[0])
+                            elif ref == "last":
+                                if "last_price" in spot_ref_df.columns and not spot_ref_df["last_price"].dropna().empty:
+                                    spot_ltp = float(spot_ref_df["last_price"].dropna().iloc[-1])
+                                elif "close" in spot_ref_df.columns and not spot_ref_df["close"].dropna().empty:
+                                    spot_ltp = float(spot_ref_df["close"].dropna().iloc[-1])
+                            elif len(ref) == 5 and ref.count(":") == 1:
+                                _hh, _mm = [int(x) for x in ref.split(":")]
+                                _ts = pd.to_datetime(spot_ref_df["ts"], errors="coerce") if "ts" in spot_ref_df.columns else pd.Series([], dtype="datetime64[ns]")
+                                if not _ts.empty:
+                                    if getattr(_ts.dt, "tz", None) is None:
+                                        _ts = _ts.dt.tz_localize(IST)
+                                    else:
+                                        _ts = _ts.dt.tz_convert(IST)
+                                    _mask = (_ts.dt.hour == _hh) & (_ts.dt.minute == _mm)
                                 else:
-                                    _ts = _ts.dt.tz_convert(IST)
-                                _mask = (_ts.dt.hour == _hh) & (_ts.dt.minute == _mm)
+                                    _mask = pd.Series(False, index=spot_ref_df.index)
+                                if _mask.any():
+                                    _idx = _mask[_mask].index[0]
+                                    spot_ltp = float(spot_ref_df.at[_idx, "close"])
+                                elif "close" in spot_ref_df.columns and not spot_ref_df["close"].dropna().empty:
+                                    spot_ltp = float(spot_ref_df["close"].dropna().iloc[0])
+                            elif ref == "signal_close":
+                                completed_spot = spot_ref_df
+                                if "ts" in spot_ref_df.columns:
+                                    spot_ts = pd.to_datetime(spot_ref_df["ts"], errors="coerce")
+                                    if getattr(spot_ts.dt, "tz", None) is None:
+                                        spot_ts = spot_ts.dt.tz_localize(IST)
+                                    else:
+                                        spot_ts = spot_ts.dt.tz_convert(IST)
+                                    completed_spot = spot_ref_df.loc[
+                                        spot_ts < pd.Timestamp(floor_to_minute(now_ist))
+                                    ]
+                                valid_spot = completed_spot.dropna(subset=["close"]).sort_values("ts")
+                                if not valid_spot.empty:
+                                    latest_spot = valid_spot.iloc[-1]
+                                    spot_ltp = safe_float(latest_spot.get("close"), 0.0)
                             else:
-                                _mask = pd.Series(False, index=spot_ref_df.index)
-                            if _mask.any():
-                                _idx = _mask[_mask].index[0]
-                                spot_ltp = float(spot_ref_df.at[_idx, "close"])
-                            elif "close" in spot_ref_df.columns and not spot_ref_df["close"].dropna().empty:
-                                spot_ltp = float(spot_ref_df["close"].dropna().iloc[0])
-                        elif ref == "signal_close":
-                            completed_spot = spot_ref_df
-                            if "ts" in spot_ref_df.columns:
-                                spot_ts = pd.to_datetime(spot_ref_df["ts"], errors="coerce")
-                                if getattr(spot_ts.dt, "tz", None) is None:
-                                    spot_ts = spot_ts.dt.tz_localize(IST)
-                                else:
-                                    spot_ts = spot_ts.dt.tz_convert(IST)
-                                completed_spot = spot_ref_df.loc[
-                                    spot_ts < pd.Timestamp(floor_to_minute(now_ist))
-                                ]
-                            valid_spot = completed_spot.dropna(subset=["close"]).sort_values("ts")
-                            if not valid_spot.empty:
-                                latest_spot = valid_spot.iloc[-1]
-                                spot_ltp = safe_float(latest_spot.get("close"), 0.0)
-                        else:
-                            if "close" in spot_ref_df.columns and not spot_ref_df["close"].dropna().empty:
-                                spot_ltp = float(spot_ref_df["close"].dropna().iloc[0])
-                    if spot_ltp > 0:
-                        print(
-                            f"Spot LTP resolved from historical ref '{AUTO_SELECT_SPOT_REF}' "
-                            f"for {live_ref_trade_date}: {spot_ltp}"
-                        )
-                except Exception as _hist_ref_exc:
-                    print(f"[LIVE AUTO-SELECT REF WARNING] {_hist_ref_exc}")
+                                if "close" in spot_ref_df.columns and not spot_ref_df["close"].dropna().empty:
+                                    spot_ltp = float(spot_ref_df["close"].dropna().iloc[0])
+                        if spot_ltp > 0:
+                            print(
+                                f"Spot LTP resolved from historical ref '{AUTO_SELECT_SPOT_REF}' "
+                                f"for {live_ref_trade_date}: {spot_ltp}"
+                            )
+                    except Exception as _hist_ref_exc:
+                        print(f"[LIVE AUTO-SELECT REF WARNING] {_hist_ref_exc}")
 
-            if spot_ltp <= 0:
-                spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
-                print(f"Spot LTP resolved from live quote: {spot_ltp}")
+                if spot_ltp <= 0:
+                    spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
+                    print(f"Spot LTP resolved from live quote: {spot_ltp}")
 
-            CE_SYMBOL, PE_SYMBOL, ce_token, pe_token = auto_select_ce_pe_symbols(kite, spot_ltp, OPTION_EXCHANGE, selection_time=None)
-            print(f"Auto-selected CE: {CE_SYMBOL} ({ce_token})")
-            print(f"Auto-selected PE: {PE_SYMBOL} ({pe_token})")
-        else:
-            # For backtests we defer auto-selection until historical spot data is fetched
-            print("Auto-selecting ATM CE/PE symbols deferred until historical spot data is loaded for backtest.")
-    else:
-        print("Resolving option tokens...")
-        ce_token = resolve_token_from_instruments(kite, CE_SYMBOL, OPTION_EXCHANGE)
-        pe_token = resolve_token_from_instruments(kite, PE_SYMBOL, OPTION_EXCHANGE)
-
-    if RUN_MODE in {"PAPERTRADE_LIVE", "LIVE_ORDER"}:
-        if RUN_MODE == "LIVE_ORDER" and not ENABLE_LIVE_ORDERS:
-            raise ValueError("For RUN_MODE = LIVE_ORDER, set ENABLE_LIVE_ORDERS = True after validating paper trades.")
-        trades = run_live_session(kite, CE_SYMBOL, PE_SYMBOL, ce_token, pe_token, execution_mode=RUN_MODE)
-        print_summary(trades, RUN_MODE, CE_SYMBOL, PE_SYMBOL)
-    else:
-        print(f"Fetching 1-minute underlying history for {UNDERLYING_NAME} ({UNDERLYING_TOKEN}) on {TRADE_DATE}...")
-        try:
-            spot = fetch_history(kite, UNDERLYING_TOKEN, TRADE_DATE, BASE_INTERVAL)
-
-            # If AUTO_SELECT_OPTION_SYMBOLS is enabled for backtest, pick ATM using historical spot close
-            if AUTO_SELECT_OPTION_SYMBOLS and not (
-                RUN_MODE == "BACKTEST"
-                and BACKTEST_OPTION_DATA_SOURCE == "DOWNLOADED"
-            ):
-                try:
-                    hist_spot_ts = None
-                    # Determine historical spot LTP based on configured reference: open/close/last or specific minute "HH:MM"
-                    if not spot.empty:
-                        ref = str(AUTO_SELECT_SPOT_REF or "").lower()
-                        # Specific minute format like "09:16"
-                        if len(ref) == 5 and ref.count(":") == 1 and ref.split(":")[0].isdigit():
-                            try:
-                                hh, mm = [int(x) for x in ref.split(":")]
-                                # Ensure spot['ts'] is datetime aware in IST
-                                s_ts = pd.to_datetime(spot["ts"], errors="coerce")
-                                if s_ts.dt.tz is None:
-                                    try:
-                                        s_ts = s_ts.dt.tz_localize(IST)
-                                    except Exception:
-                                        s_ts = s_ts
-                                else:
-                                    try:
-                                        s_ts = s_ts.dt.tz_convert(IST)
-                                    except Exception:
-                                        s_ts = s_ts
-                                target_ts = pd.Timestamp(f"{TRADE_DATE} {hh:02d}:{mm:02d}", tz=IST)
-                                # find exact match
-                                mask = s_ts.dt.time == target_ts.time()
-                                if mask.any():
-                                    idx = mask[mask].index[-1]
-                                    if "close" in spot.columns and not pd.isna(spot.at[idx, "close"]):
-                                        hist_spot_ltp = float(spot.at[idx, "close"])
-                                        hist_spot_ts = s_ts.iloc[idx]
-                                    elif "last_price" in spot.columns and not pd.isna(spot.at[idx, "last_price"]):
-                                        hist_spot_ltp = float(spot.at[idx, "last_price"])
-                                        hist_spot_ts = s_ts.iloc[idx]
-                                    else:
-                                        hist_spot_ltp = float(spot["close"].dropna().iloc[-1]) if "close" in spot.columns else get_spot_ltp(kite, UNDERLYING_NAME)
-                                        hist_spot_ts = s_ts.dropna().iloc[-1] if not s_ts.dropna().empty else None
-                                else:
-                                    # nearest timestamp fallback
-                                    diffs = (s_ts - target_ts).abs()
-                                    nearest_idx = diffs.idxmin()
-                                    if "close" in spot.columns and not pd.isna(spot.at[nearest_idx, "close"]):
-                                        hist_spot_ltp = float(spot.at[nearest_idx, "close"])
-                                        hist_spot_ts = s_ts.iloc[nearest_idx]
-                                    elif "last_price" in spot.columns and not pd.isna(spot.at[nearest_idx, "last_price"]):
-                                        hist_spot_ltp = float(spot.at[nearest_idx, "last_price"])
-                                        hist_spot_ts = s_ts.iloc[nearest_idx]
-                                    else:
-                                        hist_spot_ltp = float(spot["close"].dropna().iloc[-1]) if "close" in spot.columns else get_spot_ltp(kite, UNDERLYING_NAME)
-                                        hist_spot_ts = s_ts.dropna().iloc[-1] if not s_ts.dropna().empty else None
-                            except Exception:
-                                hist_spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
-                                hist_spot_ts = None
-                        else:
-                            try:
-                                if ref == "open" and "open" in spot.columns:
-                                    hist_spot_ltp = float(spot["open"].dropna().iloc[0])
-                                    hist_spot_ts = spot.iloc[0].get("ts")
-                                elif ref == "last":
-                                    if "last_price" in spot.columns and not spot["last_price"].dropna().empty:
-                                        hist_spot_ltp = float(spot["last_price"].dropna().iloc[-1])
-                                        hist_spot_ts = spot.iloc[-1].get("ts")
-                                    elif "close" in spot.columns and not spot["close"].dropna().empty:
-                                        hist_spot_ltp = float(spot["close"].dropna().iloc[-1])
-                                        hist_spot_ts = spot.iloc[-1].get("ts")
-                                    else:
-                                        hist_spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
-                                        hist_spot_ts = None
-                                else:  # default to close
-                                    hist_spot_ltp = float(spot["close"].dropna().iloc[-1]) if "close" in spot.columns else get_spot_ltp(kite, UNDERLYING_NAME)
-                                    hist_spot_ts = spot.iloc[-1].get("ts") if "close" in spot.columns and not spot["close"].dropna().empty else None
-                            except Exception:
-                                hist_spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
-                                hist_spot_ts = None
-                    else:
-                        hist_spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
-                        hist_spot_ts = None
-                    print(f"Auto-selecting ATM CE/PE symbols using historical spot ({AUTO_SELECT_SPOT_REF}): {hist_spot_ltp}")
-                    CE_SYMBOL, PE_SYMBOL, ce_token, pe_token = auto_select_ce_pe_symbols(
-                        kite,
-                        hist_spot_ltp,
-                        OPTION_EXCHANGE,
-                        selection_time=hist_spot_ts,
-                    )
-                    print(f"Auto-selected CE: {CE_SYMBOL} ({ce_token})")
-                    print(f"Auto-selected PE: {PE_SYMBOL} ({pe_token})")
-                except Exception as auto_exc:
-                    print(f"Auto-select failed for backtest: {auto_exc}. Falling back to configured CE/PE.")
-
-            if RUN_MODE == "BACKTEST" and BACKTEST_OPTION_DATA_SOURCE == "DOWNLOADED":
-                CE_SYMBOL, PE_SYMBOL = select_downloaded_option_symbols(spot, TRADE_DATE)
-                print(
-                    f"Using downloaded option contracts from {OPTION_DAILY_DIR}: "
-                    f"CE={CE_SYMBOL}, PE={PE_SYMBOL}"
-                )
-                ce = load_downloaded_option_history(CE_SYMBOL, TRADE_DATE)
-                pe = load_downloaded_option_history(PE_SYMBOL, TRADE_DATE)
+                CE_SYMBOL, PE_SYMBOL, ce_token, pe_token = auto_select_ce_pe_symbols(kite, spot_ltp, OPTION_EXCHANGE, selection_time=None)
+                print(f"Auto-selected CE: {CE_SYMBOL} ({ce_token})")
+                print(f"Auto-selected PE: {PE_SYMBOL} ({pe_token})")
             else:
-                if RUN_MODE == "BACKTEST":
-                    print("Using Kite historical option data for backtest.")
-                print(f"Fetching CE history for {CE_SYMBOL} ({ce_token})...")
-                ce = fetch_history(kite, ce_token, TRADE_DATE, BASE_INTERVAL)
+                # For backtests we defer auto-selection until historical spot data is fetched
+                print("Auto-selecting ATM CE/PE symbols deferred until historical spot data is loaded for backtest.")
+        else:
+            print("Resolving option tokens...")
+            ce_token = resolve_token_from_instruments(kite, CE_SYMBOL, OPTION_EXCHANGE)
+            pe_token = resolve_token_from_instruments(kite, PE_SYMBOL, OPTION_EXCHANGE)
 
-                print(f"Fetching PE history for {PE_SYMBOL} ({pe_token})...")
-                pe = fetch_history(kite, pe_token, TRADE_DATE, BASE_INTERVAL)
-        except ValueError as exc:
-            if "No history returned for token" in str(exc):
-                print(f"Market has not opened on {TRADE_DATE}. No historical data available yet.")
-                raise SystemExit(0)
-            raise
+        if RUN_MODE in {"PAPERTRADE_LIVE", "LIVE_ORDER"}:
+            if RUN_MODE == "LIVE_ORDER" and not ENABLE_LIVE_ORDERS:
+                raise ValueError("For RUN_MODE = LIVE_ORDER, set ENABLE_LIVE_ORDERS = True after validating paper trades.")
+            trades = run_live_session(kite, CE_SYMBOL, PE_SYMBOL, ce_token, pe_token, execution_mode=RUN_MODE)
+            print_summary(trades, RUN_MODE, CE_SYMBOL, PE_SYMBOL)
+        else:
+            print(f"Fetching 1-minute underlying history for {UNDERLYING_NAME} ({UNDERLYING_TOKEN}) on {TRADE_DATE}...")
+            try:
+                spot = fetch_history(kite, UNDERLYING_TOKEN, TRADE_DATE, BASE_INTERVAL)
 
-        # Fetch previous trading day OHLC for CPR + gap context in logs/summary
-        try:
-            prev_ohlc = fetch_prev_trading_day_ohlc(kite, UNDERLYING_TOKEN, TRADE_DATE)
-        except Exception:
-            prev_ohlc = {}
-        today_open = safe_float(spot.iloc[0].get("open"), 0.0) if spot is not None and not spot.empty else 0.0
-        set_mtf_interval_from_gap(
-            calculate_gap_pct(today_open, prev_ohlc.get("close")),
-            source="backtest",
-        )
+                # If AUTO_SELECT_OPTION_SYMBOLS is enabled for backtest, pick ATM using historical spot close
+                if AUTO_SELECT_OPTION_SYMBOLS and not (
+                    RUN_MODE == "BACKTEST"
+                    and BACKTEST_OPTION_DATA_SOURCE == "DOWNLOADED"
+                ):
+                    try:
+                        hist_spot_ts = None
+                        # Determine historical spot LTP based on configured reference: open/close/last or specific minute "HH:MM"
+                        if not spot.empty:
+                            ref = str(AUTO_SELECT_SPOT_REF or "").lower()
+                            # Specific minute format like "09:16"
+                            if len(ref) == 5 and ref.count(":") == 1 and ref.split(":")[0].isdigit():
+                                try:
+                                    hh, mm = [int(x) for x in ref.split(":")]
+                                    # Ensure spot['ts'] is datetime aware in IST
+                                    s_ts = pd.to_datetime(spot["ts"], errors="coerce")
+                                    if s_ts.dt.tz is None:
+                                        try:
+                                            s_ts = s_ts.dt.tz_localize(IST)
+                                        except Exception:
+                                            s_ts = s_ts
+                                    else:
+                                        try:
+                                            s_ts = s_ts.dt.tz_convert(IST)
+                                        except Exception:
+                                            s_ts = s_ts
+                                    target_ts = pd.Timestamp(f"{TRADE_DATE} {hh:02d}:{mm:02d}", tz=IST)
+                                    # find exact match
+                                    mask = s_ts.dt.time == target_ts.time()
+                                    if mask.any():
+                                        idx = mask[mask].index[-1]
+                                        if "close" in spot.columns and not pd.isna(spot.at[idx, "close"]):
+                                            hist_spot_ltp = float(spot.at[idx, "close"])
+                                            hist_spot_ts = s_ts.iloc[idx]
+                                        elif "last_price" in spot.columns and not pd.isna(spot.at[idx, "last_price"]):
+                                            hist_spot_ltp = float(spot.at[idx, "last_price"])
+                                            hist_spot_ts = s_ts.iloc[idx]
+                                        else:
+                                            hist_spot_ltp = float(spot["close"].dropna().iloc[-1]) if "close" in spot.columns else get_spot_ltp(kite, UNDERLYING_NAME)
+                                            hist_spot_ts = s_ts.dropna().iloc[-1] if not s_ts.dropna().empty else None
+                                    else:
+                                        # nearest timestamp fallback
+                                        diffs = (s_ts - target_ts).abs()
+                                        nearest_idx = diffs.idxmin()
+                                        if "close" in spot.columns and not pd.isna(spot.at[nearest_idx, "close"]):
+                                            hist_spot_ltp = float(spot.at[nearest_idx, "close"])
+                                            hist_spot_ts = s_ts.iloc[nearest_idx]
+                                        elif "last_price" in spot.columns and not pd.isna(spot.at[nearest_idx, "last_price"]):
+                                            hist_spot_ltp = float(spot.at[nearest_idx, "last_price"])
+                                            hist_spot_ts = s_ts.iloc[nearest_idx]
+                                        else:
+                                            hist_spot_ltp = float(spot["close"].dropna().iloc[-1]) if "close" in spot.columns else get_spot_ltp(kite, UNDERLYING_NAME)
+                                            hist_spot_ts = s_ts.dropna().iloc[-1] if not s_ts.dropna().empty else None
+                                except Exception:
+                                    hist_spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
+                                    hist_spot_ts = None
+                            else:
+                                try:
+                                    if ref == "open" and "open" in spot.columns:
+                                        hist_spot_ltp = float(spot["open"].dropna().iloc[0])
+                                        hist_spot_ts = spot.iloc[0].get("ts")
+                                    elif ref == "last":
+                                        if "last_price" in spot.columns and not spot["last_price"].dropna().empty:
+                                            hist_spot_ltp = float(spot["last_price"].dropna().iloc[-1])
+                                            hist_spot_ts = spot.iloc[-1].get("ts")
+                                        elif "close" in spot.columns and not spot["close"].dropna().empty:
+                                            hist_spot_ltp = float(spot["close"].dropna().iloc[-1])
+                                            hist_spot_ts = spot.iloc[-1].get("ts")
+                                        else:
+                                            hist_spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
+                                            hist_spot_ts = None
+                                    else:  # default to close
+                                        hist_spot_ltp = float(spot["close"].dropna().iloc[-1]) if "close" in spot.columns else get_spot_ltp(kite, UNDERLYING_NAME)
+                                        hist_spot_ts = spot.iloc[-1].get("ts") if "close" in spot.columns and not spot["close"].dropna().empty else None
+                                except Exception:
+                                    hist_spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
+                                    hist_spot_ts = None
+                        else:
+                            hist_spot_ltp = get_spot_ltp(kite, UNDERLYING_NAME)
+                            hist_spot_ts = None
+                        print(f"Auto-selecting ATM CE/PE symbols using historical spot ({AUTO_SELECT_SPOT_REF}): {hist_spot_ltp}")
+                        CE_SYMBOL, PE_SYMBOL, ce_token, pe_token = auto_select_ce_pe_symbols(
+                            kite,
+                            hist_spot_ltp,
+                            OPTION_EXCHANGE,
+                            selection_time=hist_spot_ts,
+                        )
+                        print(f"Auto-selected CE: {CE_SYMBOL} ({ce_token})")
+                        print(f"Auto-selected PE: {PE_SYMBOL} ({pe_token})")
+                    except Exception as auto_exc:
+                        print(f"Auto-select failed for backtest: {auto_exc}. Falling back to configured CE/PE.")
 
-        print(f"Preparing 1-minute + {MTF_INTERVAL} merged dataset...")
-        day = prepare_merged_day(spot, ce, pe)
+                if RUN_MODE == "BACKTEST" and BACKTEST_OPTION_DATA_SOURCE == "DOWNLOADED":
+                    CE_SYMBOL, PE_SYMBOL = select_downloaded_option_symbols(spot, TRADE_DATE)
+                    print(
+                        f"Using downloaded option contracts from {OPTION_DAILY_DIR}: "
+                        f"CE={CE_SYMBOL}, PE={PE_SYMBOL}"
+                    )
+                    ce = load_downloaded_option_history(CE_SYMBOL, TRADE_DATE)
+                    pe = load_downloaded_option_history(PE_SYMBOL, TRADE_DATE)
+                else:
+                    if RUN_MODE == "BACKTEST":
+                        print("Using Kite historical option data for backtest.")
+                    print(f"Fetching CE history for {CE_SYMBOL} ({ce_token})...")
+                    ce = fetch_history(kite, ce_token, TRADE_DATE, BASE_INTERVAL)
 
-        day.attrs["nifty_prev_close"] = safe_float(prev_ohlc.get("close"), 0.0)
-        day.attrs["nifty_prev_high"] = safe_float(prev_ohlc.get("high"), 0.0)
-        day.attrs["nifty_prev_low"] = safe_float(prev_ohlc.get("low"), 0.0)
+                    print(f"Fetching PE history for {PE_SYMBOL} ({pe_token})...")
+                    pe = fetch_history(kite, pe_token, TRADE_DATE, BASE_INTERVAL)
+            except ValueError as exc:
+                if "No history returned for token" in str(exc):
+                    print(f"Market has not opened on {TRADE_DATE}. No historical data available yet.")
+                    raise SystemExit(0)
+                raise
 
-        trades = run_single_day_test(day, RUN_MODE, ce_symbol_override=CE_SYMBOL, pe_symbol_override=PE_SYMBOL)
-        export_outputs(trades, day, CE_SYMBOL, PE_SYMBOL, RUN_MODE)
-        print_summary(trades, RUN_MODE, CE_SYMBOL, PE_SYMBOL)
-except PermissionException as exc:
-    msg = str(exc)
-    print("Kite order placement blocked by API permission settings.")
-    print(f"Details: {msg}")
-    print("Fix: add this machine's current public IP in Kite developer console allowlist and retry.")
-    print("Kite console: https://developers.kite.trade")
-    raise SystemExit(2)
-except InputException as exc:
-    msg = str(exc)
-    if "market protection" in msg.lower():
-        print("Kite rejected MARKET order due to market-protection policy.")
+            # Fetch previous trading day OHLC for CPR + gap context in logs/summary
+            try:
+                prev_ohlc = fetch_prev_trading_day_ohlc(kite, UNDERLYING_TOKEN, TRADE_DATE)
+            except Exception:
+                prev_ohlc = {}
+            today_open = safe_float(spot.iloc[0].get("open"), 0.0) if spot is not None and not spot.empty else 0.0
+            set_mtf_interval_from_gap(
+                calculate_gap_pct(today_open, prev_ohlc.get("close")),
+                source="backtest",
+            )
+
+            print(f"Preparing 1-minute + {MTF_INTERVAL} merged dataset...")
+            day = prepare_merged_day(spot, ce, pe)
+
+            day.attrs["nifty_prev_close"] = safe_float(prev_ohlc.get("close"), 0.0)
+            day.attrs["nifty_prev_high"] = safe_float(prev_ohlc.get("high"), 0.0)
+            day.attrs["nifty_prev_low"] = safe_float(prev_ohlc.get("low"), 0.0)
+
+            trades = run_single_day_test(day, RUN_MODE, ce_symbol_override=CE_SYMBOL, pe_symbol_override=PE_SYMBOL)
+            export_outputs(trades, day, CE_SYMBOL, PE_SYMBOL, RUN_MODE)
+            print_summary(trades, RUN_MODE, CE_SYMBOL, PE_SYMBOL)
+    except PermissionException as exc:
+        msg = str(exc)
+        print("Kite order placement blocked by API permission settings.")
         print(f"Details: {msg}")
-        print("This script now retries with aggressive LIMIT fallback when enabled.")
-        print("If still failing, set LIVE_ORDER_ORDER_TYPE = 'LIMIT' and retry.")
-    else:
-        print("Kite input validation error.")
-        print(f"Details: {msg}")
-    raise SystemExit(3)
+        print("Fix: add this machine's current public IP in Kite developer console allowlist and retry.")
+        print("Kite console: https://developers.kite.trade")
+        raise SystemExit(2)
+    except InputException as exc:
+        msg = str(exc)
+        if "market protection" in msg.lower():
+            print("Kite rejected MARKET order due to market-protection policy.")
+            print(f"Details: {msg}")
+            print("This script now retries with aggressive LIMIT fallback when enabled.")
+            print("If still failing, set LIVE_ORDER_ORDER_TYPE = 'LIMIT' and retry.")
+        else:
+            print("Kite input validation error.")
+            print(f"Details: {msg}")
+        raise SystemExit(3)
+
+
+if __name__ == "__main__":
+    main()
