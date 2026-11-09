@@ -1,0 +1,13 @@
+# NSE trading holidays (weekdays only; weekends are skipped automatically).
+# scripts/daily_download.py skips these dates cleanly ("market holiday"),
+# so the dashboard shows "Skipped" instead of "Kite login failed".
+#
+# Format: one date per line, YYYY-MM-DD, optional comment after #.
+# Add the rest of the year from NSE's official holiday calendar
+# (nseindia.com -> Resources -> Exchange Communication -> Holidays).
+# Upload this file to the server's scripts/ folder after editing.
+
+# Confirmed from data (Kite returned no candles on these weekdays):
+2026-10-02  # Gandhi Jayanti
+2026-10-20  # weekly expiry moved to 19 Oct
+2026-11-10  # weekly expiry moved to 9 Nov

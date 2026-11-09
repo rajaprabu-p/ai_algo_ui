@@ -1650,7 +1650,7 @@ def parse_daily_download_log(text: str) -> dict:
             current["errors"].append(message)
         elif message.startswith("No candles returned for "):
             current["notes"].append(message + " (market holiday?)")
-        elif match and message.startswith(("weekend:", "market not closed")):
+        elif match and message.startswith(("weekend:", "market not closed", "market holiday")):
             current["status"], current["detail"] = "SKIPPED", message
         elif match and message.startswith("dry run"):
             current["status"], current["detail"] = "DRY_RUN", message

@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOWNLOADER = PROJECT_ROOT / "scripts" / "nifty_weekly_options_daily_files_only.py"
 ARCHIVE_DIR = PROJECT_ROOT / "data" / "instrument_archives"
+HOLIDAYS_FILE = PROJECT_ROOT / "scripts" / "market_holidays.txt"
 IST = ZoneInfo("Asia/Kolkata")
 MARKET_CLOSE = dt_time(15, 45)
 ARCHIVE_NAME_RE = re.compile(r"^nfo_instruments_(\d{8})_(\d{6})\.csv$")
@@ -53,6 +54,23 @@ def load_env() -> None:
             key, value = line.split("=", 1)
             # .env wins: the dashboard/token tool rewrites it with the fresh daily token.
             os.environ[key.strip().lstrip("﻿")] = value.strip().strip('"').strip("'")
+
+
+def load_holidays(path: Path = HOLIDAYS_FILE) -> dict[date, str]:
+    """Dates from scripts/market_holidays.txt ("YYYY-MM-DD  # name"). Missing file -> none."""
+    holidays: dict[date, str] = {}
+    if not path.exists():
+        return holidays
+    for number, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        text, _, comment = raw.partition("#")
+        text = text.strip()
+        if not text:
+            continue
+        try:
+            holidays[date.fromisoformat(text)] = comment.strip()
+        except ValueError:
+            log(f"WARNING: {path.name} line {number} is not a YYYY-MM-DD date: {raw.strip()!r} (ignored)")
+    return holidays
 
 
 def nearest_expiries(kite, trade_day: date, count: int) -> list[date]:
@@ -110,7 +128,8 @@ def main() -> int:
     parser.add_argument("--date", help="Trading date YYYY-MM-DD (default: today IST)")
     parser.add_argument("--expiries", type=int, default=2, help="How many nearest expiries to download (default 2)")
     parser.add_argument("--dry-run", action="store_true", help="Only print the expiries it would download")
-    parser.add_argument("--force", action="store_true", help="Run for today even before 15:45 IST")
+    parser.add_argument("--force", action="store_true",
+                        help="Run even before 15:45 IST or on a date listed in scripts/market_holidays.txt")
     args = parser.parse_args()
 
     now = datetime.now(IST)
@@ -119,6 +138,11 @@ def main() -> int:
 
     if trade_day.weekday() >= 5:
         log("weekend: nothing to download")
+        return 0
+    holidays = load_holidays()
+    if trade_day in holidays and not args.force:
+        name = f" ({holidays[trade_day]})" if holidays[trade_day] else ""
+        log(f"market holiday{name}: nothing to download")
         return 0
     if trade_day == now.date() and now.time() < MARKET_CLOSE and not args.force:
         log(f"market not closed yet (run after {MARKET_CLOSE.strftime('%H:%M')} IST): nothing to do")
