@@ -146,6 +146,12 @@ OPTION_EXCHANGE = "NFO"
 # Auto select option symbols (used only when AUTO_SELECT_OPTION_SYMBOLS = True)
 AUTO_SELECT_OPTION_SYMBOLS = True  # If True, CE_SYMBOL and PE_SYMBOL are ignored and auto-selected based on the rules below
 AUTO_SELECT_EXPIRY = ""      # e.g. "2026-03-24"; keep blank for nearest available expiry
+# On an expiry day: True = trade the contract expiring today; False = skip it and
+# trade the next expiry (the behaviour before 2026-11-09). Applies to live, paper
+# and backtest via option_expiry_cutoff(). Backtest of 4 expiry days (13/19/27 Oct,
+# 3 Nov 2026): same-day v28 +7,283 vs +2,840 Rs, v30 +11,063 vs +3,764 Rs
+# (small sample, no slippage modelled).
+TRADE_SAME_DAY_EXPIRY = True
 AUTO_SELECT_STRIKE_STEP = 50
 AUTO_SELECT_SPOT_REF = "SIGNAL_CLOSE"  # Select from the latest completed 1-minute spot candle at each entry opportunity
 AUTO_SELECT_SESSION_LOCKED = False  # Allow strike selection to follow the signal-candle close
@@ -172,6 +178,10 @@ _SIGNAL_CLOSE_STRIKE_LOG_KEYS = set()
 # If ENABLE_MTM_GUARD = False -> use only MAX_TRADES
 ENABLE_MTM_GUARD = True
 MAX_TRADES = EDITABLE_CONFIG["MAX_TRADES"]
+# On an expiry day allow at most this many entries (0 = no special limit, use MAX_TRADES).
+# Added 2026-11-09 with TRADE_SAME_DAY_EXPIRY: expiry-day options are cheap and fast,
+# and on 9 Nov two same-expiry entries both hit the 25-pt SL (-3,250 Rs) in a choppy open.
+EXPIRY_DAY_MAX_TRADES = 1
 
 ENABLE_CONSECUTIVE_LOSS_GUARD = True
 MAX_CONSECUTIVE_LOSSES = 2
@@ -1131,7 +1141,13 @@ def extract_option_strike(symbol: str) -> int:
 
 
 def option_expiry_cutoff(trade_day):
-    """Return the trade date as the expiry cutoff for the shared policy."""
+    """Expiry cutoff for the shared policy: callers keep expiries strictly AFTER it.
+
+    TRADE_SAME_DAY_EXPIRY=True  -> cutoff is the day before, so today's expiry is eligible.
+    TRADE_SAME_DAY_EXPIRY=False -> cutoff is today, so today's expiry is skipped.
+    """
+    if TRADE_SAME_DAY_EXPIRY:
+        return trade_day - timedelta(days=1)
     return trade_day
 
 
@@ -1481,6 +1497,58 @@ def get_instruments_df(kite: KiteConnect, exchange: str = "NFO") -> pd.DataFrame
             instruments["expiry"] = pd.to_datetime(instruments["expiry"], errors="coerce")
         _instruments_cache[exchange] = instruments
     return _instruments_cache[exchange].copy()
+
+
+_EXPIRY_DAY_CACHE: Dict[str, bool] = {}
+
+
+def is_expiry_day(trade_date) -> bool:
+    """True when a NIFTY weekly option expires on trade_date. Cached; never raises.
+
+    Sources, in order: a downloaded option file whose expiry is trade_date
+    (nifty_weekly_<trade_date>_*.csv), then Kite's NFO instrument list (live,
+    paper and Kite-source backtests of today). If neither can tell, returns False,
+    so the normal MAX_TRADES applies, and prints a warning once.
+    """
+    key = str(trade_date or "")[:10]
+    if key in _EXPIRY_DAY_CACHE:
+        return _EXPIRY_DAY_CACHE[key]
+    result, source = False, "none"
+    try:
+        if any(OPTION_DAILY_DIR.glob(f"nifty_weekly_{key}_*.csv")):
+            result, source = True, "downloaded files"
+        elif any(OPTION_DAILY_DIR.glob(f"nifty_weekly_*_{key}.csv")):
+            source = "downloaded files"  # files for this trade date exist and none expires that day
+        else:
+            _kite = globals().get("kite")
+            if _kite is not None:
+                opts = get_instruments_df(_kite, OPTION_EXCHANGE)
+                opts = opts[(opts["name"] == UNDERLYING_NAME) & (opts["segment"].astype(str).str.contains("NFO-OPT", na=False))]
+                expiries = set(pd.to_datetime(opts["expiry"], errors="coerce").dt.date.dropna())
+                result = pd.Timestamp(key).date() in expiries
+                source = "kite instruments"
+    except Exception as exc:
+        print(f"[EXPIRY DAY] could not determine expiry status for {key}: {exc}; using MAX_TRADES={MAX_TRADES}")
+        source = "error"
+    if source == "none":
+        print(f"[EXPIRY DAY] no option data to tell whether {key} is an expiry day; using MAX_TRADES={MAX_TRADES}")
+    elif result:
+        print(f"[EXPIRY DAY] {key} is an expiry day ({source}): max trades {get_effective_max_trades_for(True)}")
+    _EXPIRY_DAY_CACHE[key] = result
+    return result
+
+
+def get_effective_max_trades_for(expiry_day: bool) -> int:
+    base = safe_int(MAX_TRADES, 0)
+    limit = safe_int(EXPIRY_DAY_MAX_TRADES, 0)
+    if expiry_day and limit > 0:
+        return min(base, limit) if base > 0 else limit
+    return base
+
+
+def get_effective_max_trades(trade_date) -> int:
+    """MAX_TRADES, capped at EXPIRY_DAY_MAX_TRADES on an expiry day (0 = unlimited)."""
+    return get_effective_max_trades_for(is_expiry_day(trade_date))
 
 
 def round_to_step(value: float, step: int) -> int:
@@ -3464,8 +3532,8 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
         return len(live_state.get("live_trade_events") or [])
 
     def max_trades_reached_in_execution() -> bool:
-        """MAX_TRADES limits total BUY entries for the session."""
-        max_trades_cfg = safe_int(MAX_TRADES, 0)
+        """MAX_TRADES (EXPIRY_DAY_MAX_TRADES on an expiry day) limits total BUY entries for the session."""
+        max_trades_cfg = get_effective_max_trades(trade_date)
         if max_trades_cfg <= 0:
             return False
         return get_execution_entry_count() >= max_trades_cfg
@@ -4787,7 +4855,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             log_entry_diag(
                 "BLOCK_MAX_TRADES_REACHED",
                 pending_buy,
-                extra=f"entries={get_execution_entry_count()} cfg={safe_int(MAX_TRADES, 0)}",
+                extra=f"entries={get_execution_entry_count()} cfg={get_effective_max_trades(trade_date)}",
             )
             pending_buy = None
             # In LIVE_ORDER, do not write MAX_TRADES into strategy attrs; live stop is decided from completed execution trades only.
@@ -4796,7 +4864,8 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             if not live_state.get("max_trades_block_logged"):
                 print(
                     f"[MAX_TRADES BLOCK] Fresh entry skipped because session entry count "
-                    f"{get_execution_entry_count()} reached MAX_TRADES={safe_int(MAX_TRADES, 0)}"
+                    f"{get_execution_entry_count()} reached max trades={get_effective_max_trades(trade_date)}"
+                    f"{' (expiry day)' if is_expiry_day(trade_date) else ''}"
                 )
                 live_state["max_trades_block_logged"] = True
 
@@ -5158,7 +5227,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             log_entry_diag(
                 "ENTRY_COUNT_INCREMENTED",
                 pending_buy,
-                extra=f"entries={get_execution_entry_count()} cfg={safe_int(MAX_TRADES, 0)}",
+                extra=f"entries={get_execution_entry_count()} cfg={get_effective_max_trades(trade_date)}",
             )
             if execution_mode == "PAPERTRADE_LIVE":
                 lock_entry_symbols_to_first_trade_strike(
@@ -6519,15 +6588,12 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
 
             # trade_count resets on every incremental rebuild. Use the
             # persistent session counter in live/paper modes.
+            # get_effective_max_trades: MAX_TRADES, or EXPIRY_DAY_MAX_TRADES on an expiry day.
+            max_trades_cfg = get_effective_max_trades(session_trade_date)
             if run_mode in {"PAPERTRADE_LIVE", "LIVE_ORDER"}:
-                max_trades_cfg = safe_int(MAX_TRADES, 0)
                 trade_guard_hit = max_trades_cfg > 0 and safe_int(execution_entry_count, 0) >= max_trades_cfg
             else:
-                trade_guard_hit = (
-                    MAX_TRADES is not None
-                    and MAX_TRADES > 0
-                    and trade_count >= MAX_TRADES
-                )
+                trade_guard_hit = max_trades_cfg > 0 and trade_count >= max_trades_cfg
             if trade_guard_hit:
                 guard_stop_reason = "MAX_TRADES_REACHED"
                 day.loc[i, "guard_status"] = guard_stop_reason

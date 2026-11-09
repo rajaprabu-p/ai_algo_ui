@@ -253,6 +253,151 @@ class SymbolHelperTests(StrategyTestCase):
             self.assertEqual(m.safe_int(None, 4), 4)
 
 
+class ExpirySelectionTests(StrategyTestCase):
+    """Expiry choice on an expiry day (TRADE_SAME_DAY_EXPIRY)."""
+
+    EXPIRY_DAY = "2026-11-03"
+    NEXT_EXPIRY = "2026-11-09"
+
+    def instruments(self):
+        rows = []
+        token = 1000
+        for expiry, code in ((self.EXPIRY_DAY, "26N03"), (self.NEXT_EXPIRY, "26N09")):
+            for strike in (23750.0, 23800.0, 23850.0):
+                for kind in ("CE", "PE"):
+                    token += 1
+                    rows.append({
+                        "name": "NIFTY", "segment": "NFO-OPT", "instrument_type": kind,
+                        "tradingsymbol": f"NIFTY{code}{int(strike)}{kind}", "instrument_token": token,
+                        "strike": strike, "expiry": pd.Timestamp(expiry),
+                    })
+        return pd.DataFrame(rows)
+
+    def select_live(self, m, trade_date, same_day):
+        with mock.patch.multiple(m, TRADE_SAME_DAY_EXPIRY=same_day, RUN_MODE="BACKTEST", TRADE_DATE=trade_date,
+                                 AUTO_SELECT_EXPIRY="", _LAST_AUTOSELECT_EXPIRY_LOG_KEY=None,
+                                 _LAST_AUTOSELECT_SYMBOLS_LOG_KEY=None), \
+                mock.patch.object(m, "get_instruments_df", return_value=self.instruments()), \
+                mock.patch("builtins.print"):
+            return m.auto_select_ce_pe_symbols(kite=None, spot_ltp=23810.0)
+
+    def test_cutoff(self):
+        import datetime as dt
+        day = dt.date(2026, 11, 3)
+        for m in self.each_module():
+            with mock.patch.object(m, "TRADE_SAME_DAY_EXPIRY", True):
+                self.assertEqual(m.option_expiry_cutoff(day), dt.date(2026, 11, 2))
+            with mock.patch.object(m, "TRADE_SAME_DAY_EXPIRY", False):
+                self.assertEqual(m.option_expiry_cutoff(day), day)
+
+    def test_default_is_same_day(self):
+        for m in self.each_module():
+            self.assertTrue(m.TRADE_SAME_DAY_EXPIRY)
+
+    def test_live_selection_on_expiry_day(self):
+        for m in self.each_module():
+            ce, pe, _, _ = self.select_live(m, self.EXPIRY_DAY, same_day=True)
+            self.assertEqual((ce, pe), ("NIFTY26N0323800CE", "NIFTY26N0323800PE"))
+            ce, pe, _, _ = self.select_live(m, self.EXPIRY_DAY, same_day=False)
+            self.assertEqual((ce, pe), ("NIFTY26N0923800CE", "NIFTY26N0923800PE"))
+
+    def test_live_selection_on_normal_day_unchanged(self):
+        for m in self.each_module():
+            for same_day in (True, False):
+                ce, _, _, _ = self.select_live(m, "2026-11-02", same_day)
+                self.assertEqual(ce, "NIFTY26N0323800CE")  # nearest expiry either way
+
+    def test_backtest_csv_selection_on_expiry_day(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for expiry, code in ((self.EXPIRY_DAY, "26N03"), (self.NEXT_EXPIRY, "26N09")):
+                rows = [{
+                    "timestamp": f"{self.EXPIRY_DAY}T09:15:00+05:30", "tradingsymbol": f"NIFTY{code}{s}{k}",
+                    "strike": float(s), "option_type": k, "expiry": expiry,
+                    "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1,
+                } for s in (23750, 23800, 23850) for k in ("CE", "PE")]
+                pd.DataFrame(rows).to_csv(Path(tmp) / f"nifty_weekly_{expiry}_{self.EXPIRY_DAY}.csv", index=False)
+            spot = pd.DataFrame({"ts": [pd.Timestamp(f"{self.EXPIRY_DAY} 09:15", tz="Asia/Kolkata")], "close": [23810.0]})
+            for m in self.each_module():
+                for same_day, code in ((True, "26N03"), (False, "26N09")):
+                    with mock.patch.multiple(m, TRADE_SAME_DAY_EXPIRY=same_day, OPTION_DAILY_DIR=Path(tmp), AUTO_SELECT_EXPIRY=""), \
+                            mock.patch("builtins.print"):
+                        ce, pe = m.select_downloaded_option_symbols(spot, self.EXPIRY_DAY)
+                    with self.subTest(same_day=same_day):
+                        self.assertEqual((ce, pe), (f"NIFTY{code}23800CE", f"NIFTY{code}23800PE"))
+
+
+class ExpiryDayTradeLimitTests(StrategyTestCase):
+    """EXPIRY_DAY_MAX_TRADES caps entries on an expiry day."""
+
+    def make_files(self, tmp, names):
+        from pathlib import Path
+
+        for name in names:
+            (Path(tmp) / name).write_text("timestamp\n", encoding="utf-8")
+
+    def check(self, m, tmp, trade_date, kite=None, **settings):
+        from pathlib import Path
+
+        patches = dict(OPTION_DAILY_DIR=Path(tmp), _EXPIRY_DAY_CACHE={}, MAX_TRADES=2, EXPIRY_DAY_MAX_TRADES=1)
+        patches.update(settings)
+        with mock.patch.multiple(m, **patches), mock.patch.dict(vars(m), {"kite": kite}), mock.patch("builtins.print"):
+            return m.is_expiry_day(trade_date), m.get_effective_max_trades(trade_date)
+
+    def test_downloaded_files_decide(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_files(tmp, ["nifty_weekly_2026-11-03_2026-11-03.csv", "nifty_weekly_2026-11-09_2026-11-03.csv",
+                                  "nifty_weekly_2026-11-09_2026-11-04.csv"])
+            for m in self.each_module():
+                self.assertEqual(self.check(m, tmp, "2026-11-03"), (True, 1))
+                self.assertEqual(self.check(m, tmp, "2026-11-04"), (False, 2))
+
+    def test_kite_instruments_when_no_files(self):
+        import tempfile
+
+        class FakeKite:
+            def instruments(self, exchange):
+                return [
+                    {"name": "NIFTY", "segment": "NFO-OPT", "expiry": "2026-11-17", "tradingsymbol": "X", "instrument_token": 1, "strike": 1},
+                    {"name": "BANKNIFTY", "segment": "NFO-OPT", "expiry": "2026-11-12", "tradingsymbol": "Y", "instrument_token": 2, "strike": 1},
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for m in self.each_module():
+                with mock.patch.dict(m._instruments_cache, {}, clear=True):
+                    self.assertEqual(self.check(m, tmp, "2026-11-17", kite=FakeKite()), (True, 1))
+                with mock.patch.dict(m._instruments_cache, {}, clear=True):
+                    self.assertEqual(self.check(m, tmp, "2026-11-12", kite=FakeKite()), (False, 2))  # BANKNIFTY only
+
+    def test_unknown_falls_back_to_max_trades(self):
+        import tempfile
+
+        class BrokenKite:
+            def instruments(self, exchange):
+                raise RuntimeError("down")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for m in self.each_module():
+                self.assertEqual(self.check(m, tmp, "2026-11-17"), (False, 2))  # no files, no kite
+                with mock.patch.dict(m._instruments_cache, {}, clear=True):
+                    self.assertEqual(self.check(m, tmp, "2026-11-17", kite=BrokenKite()), (False, 2))
+
+    def test_limit_settings(self):
+        for m in self.each_module():
+            self.assertEqual(m.EXPIRY_DAY_MAX_TRADES, 1)
+            with mock.patch.multiple(m, MAX_TRADES=2, EXPIRY_DAY_MAX_TRADES=0):
+                self.assertEqual(m.get_effective_max_trades_for(True), 2)   # 0 disables the expiry limit
+            with mock.patch.multiple(m, MAX_TRADES=1, EXPIRY_DAY_MAX_TRADES=3):
+                self.assertEqual(m.get_effective_max_trades_for(True), 1)   # never raises MAX_TRADES
+            with mock.patch.multiple(m, MAX_TRADES=0, EXPIRY_DAY_MAX_TRADES=1):
+                self.assertEqual(m.get_effective_max_trades_for(True), 1)
+                self.assertEqual(m.get_effective_max_trades_for(False), 0)
+
+
 class EntryDiagnosticsDedupeTests(StrategyTestCase):
     def capture(self, m, rebuilds, dedupe=True):
         import contextlib
