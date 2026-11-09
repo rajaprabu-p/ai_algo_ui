@@ -63,6 +63,16 @@ python app.py
 
 Notes:
 - The UI writes `strategy.log` and `strategy.pid` next to the scripts.
+- Strategy run logs are written to `STRATEGY_LOG_DIR` when set, or to the repository's `logs/` directory by default. For persistent Azure or Vultr storage, create a writable directory and set `STRATEGY_LOG_DIR=/var/log/rpalgo` in `.env` before starting the app:
+
+```bash
+sudo mkdir -p /var/log/rpalgo
+sudo chown -R "$USER":"$USER" /var/log/rpalgo
+printf '\nSTRATEGY_LOG_DIR=/var/log/rpalgo\n' >> .env
+```
+
 - The Flask app launches the strategy as a subprocess using the same Python executable as Flask. For production, consider using `gunicorn` or `systemd` to manage the Flask process.
  - The UI supports specifying `mode` and `date` when starting the strategy. Use the frontend controls or POST to `/api/start` with JSON `{ "mode": "BACKTEST", "date": "2026-06-19" }`.
+ - In BACKTEST mode, the Option data selector is passed to each daily run in the selected date range; choosing Downloaded CSV reads option candles from the matching local daily CSV files, including for older dates when those files are available.
+ - Weekly option CSV downloads are manual: start them from the “Download NIFTY Weekly Option CSVs” section in the UI.
  - Logs can be viewed at `/api/logs` (returns tail) or the UI at `/`.

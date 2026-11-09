@@ -112,6 +112,16 @@
         margin-top: 0.8rem;
         font-weight: 600;
       }
+
+      .notice {
+        margin-top: 0.8rem;
+        padding: 0.6rem 0.75rem;
+        border-radius: 8px;
+        background: #fef3c7;
+        color: #78350f;
+        font-size: 0.9rem;
+        line-height: 1.4;
+      }
     </style>
   </head>
   <body>
@@ -130,6 +140,9 @@
         </label>
         <button type="submit">Sign In</button>
       </form>
+      {% if notice %}
+      <div class="notice">{{ notice }}</div>
+      {% endif %}
       {% if error %}
       <div class="error">{{ error }}</div>
       {% endif %}

@@ -8,6 +8,15 @@ logs/
 **/
 !templates/
 !templates/**
+!scripts/
+!scripts/**
 !.gitignore
 !requirements.txt
 .env
+
+# Runtime and editor leftovers (must stay below the !scripts/** rule)
+__pycache__/
+*.pyc
+*.lock
+*.mode
+*.orig

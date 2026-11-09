@@ -21,7 +21,8 @@ import pandas as pd
 from datetime import datetime
 
 # ── Config ────────────────────────────────────────────────────────────────────
-LOGS_FOLDER    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+DEFAULT_LOGS_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+LOGS_FOLDER    = os.path.abspath(os.environ.get("STRATEGY_LOG_DIR", DEFAULT_LOGS_FOLDER).strip() or DEFAULT_LOGS_FOLDER)
 OUTPUT_FILE    = os.path.join(LOGS_FOLDER, "consolidated_backtest.xlsx")  # overridden at runtime
 FILE_PATTERNS  = ["backtest_*.xlsx", "papertrade_*.xlsx"]  # backtest and papertrade files
 LOGS_SUBFOLDER = ""                         # optional subfolder inside LOGS_FOLDER

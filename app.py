@@ -9,20 +9,25 @@ import signal
 import sys
 import time
 import re
+import socket
+import hmac
+import threading
 from datetime import datetime, timedelta, timezone
+from werkzeug.security import check_password_hash
 try:
     import pandas as pd
 except Exception:
     pd = None
+from scripts.editable_config import load_editable_config, save_editable_config
 
 app = Flask(__name__)
 
 WORKDIR = os.path.dirname(os.path.abspath(__file__))
-STRATEGY_SCRIPT = os.path.join(WORKDIR, "v28_50pt_strategy_main.py")
-KITE_TEST_SCRIPT = os.path.join(WORKDIR, "test_kite_login.py")
-CONSOLIDATE_SCRIPT = os.path.join(WORKDIR, "consolidate_backtest_logs.py")
-LOGS_DIR = os.path.join(WORKDIR, "logs")
-LOG_FILE = os.path.join(WORKDIR, "strategy.log")
+SCRIPTS_DIR = os.path.join(WORKDIR, "scripts")
+STRATEGY_SCRIPT = os.path.join(SCRIPTS_DIR, "v28_strategy_main.py")
+KITE_TEST_SCRIPT = os.path.join(SCRIPTS_DIR, "test_kite_login.py")
+WEEKLY_OPTIONS_SCRIPT = os.path.join(SCRIPTS_DIR, "nifty_weekly_options_daily_files_only.py")
+CONSOLIDATE_SCRIPT = os.path.join(SCRIPTS_DIR, "consolidate_backtest_logs.py")
 PID_FILE = os.path.join(WORKDIR, "strategy.pid")
 ENV_FILE = os.path.join(WORKDIR, ".env")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -38,11 +43,31 @@ SUMMARY_MARKET_CONTEXT_FIELDS = [
     "nifty_change",
     "gap_type",
     "gap_points",
+    "gap_pct",
+    "cpr_width_pct",
+    "cpr_type",
 ]
 
 
 def ist_now_str() -> str:
     return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S") + " IST"
+
+
+def local_server_ip() -> str:
+    """Return the local address other devices can use to reach this server."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            return probe.getsockname()[0]
+    except OSError:
+        try:
+            addresses = socket.gethostbyname_ex(socket.gethostname())[2]
+            for address in addresses:
+                if not address.startswith("127."):
+                    return address
+        except OSError:
+            pass
+    return "127.0.0.1"
 
 
 def write_env_var(key: str, value: str) -> None:
@@ -99,20 +124,100 @@ def load_env_file(env_path: str = None) -> None:
 # Load .env into environment at startup so `API_KEY`/`API_SECRET` are available
 load_env_file()
 
-# App auth defaults requested by user.
-LOGIN_USERNAME = os.environ.get("LOGIN_USERNAME", "rajaprabu")
-LOGIN_PASSWORD = os.environ.get("LOGIN_PASSWORD", "R@j@Pr@bu")
-APP_SECRET_KEY = os.environ.get("APP_SECRET_KEY", "change-me-login-secret")
+DEFAULT_STRATEGY_LOG_DIR = os.path.join(WORKDIR, "logs")
+STRATEGY_LOG_DIR = os.path.abspath(
+    os.environ.get("STRATEGY_LOG_DIR", DEFAULT_STRATEGY_LOG_DIR).strip()
+    or DEFAULT_STRATEGY_LOG_DIR
+)
+LOGS_DIR = STRATEGY_LOG_DIR
+LOG_FILE = os.path.join(STRATEGY_LOG_DIR, "strategy.log")
 
-# Persist defaults into .env if they are missing.
-if "LOGIN_USERNAME" not in os.environ:
-    write_env_var("LOGIN_USERNAME", LOGIN_USERNAME)
-if "LOGIN_PASSWORD" not in os.environ:
-    write_env_var("LOGIN_PASSWORD", LOGIN_PASSWORD)
-if "APP_SECRET_KEY" not in os.environ:
-    write_env_var("APP_SECRET_KEY", APP_SECRET_KEY)
+# Login credentials come only from .env: a password hash, never the password.
+# Create them with `python scripts/set_login_password.py`. There are no built-in
+# defaults: a missing or known-public value stops the app instead of exposing it.
+LOGIN_USERNAME = os.environ.get("LOGIN_USERNAME", "").strip()
+LOGIN_PASSWORD_HASH = os.environ.get("LOGIN_PASSWORD_HASH", "").strip()
+APP_SECRET_KEY = os.environ.get("APP_SECRET_KEY", "").strip()
+_PUBLIC_SECRET_KEYS = {"change-me-login-secret", "REPLACE_WITH_APP_SECRET_KEY"}
+if not LOGIN_USERNAME or not LOGIN_PASSWORD_HASH or len(APP_SECRET_KEY) < 32 or APP_SECRET_KEY in _PUBLIC_SECRET_KEYS:
+    sys.exit(
+        "Login is not configured: LOGIN_USERNAME, LOGIN_PASSWORD_HASH and a random "
+        "APP_SECRET_KEY (32+ characters) must be set in .env.\n"
+        "Run: python scripts/set_login_password.py"
+    )
 
 app.secret_key = APP_SECRET_KEY
+app.config.update(
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=6),
+    SESSION_COOKIE_HTTPONLY=True,
+    # Browsers do not send a Lax cookie on cross-site form posts or fetches, so
+    # another website cannot trigger dashboard actions in a logged-in browser.
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
+# Routes reachable without logging in. Everything else requires a session.
+PUBLIC_ENDPOINTS = {"login_page", "static"}
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
+
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 300
+_login_failures: dict = {}
+_login_failures_lock = threading.Lock()
+
+
+@app.before_request
+def require_login():
+    if request.endpoint in PUBLIC_ENDPOINTS or session.get("logged_in"):
+        return None
+    if request.endpoint == "kite_callback" and request.args.get("request_token"):
+        # Kite redirects to the Redirect URL registered for the app. If that address
+        # differs from the one the dashboard was opened on, this browser has no session
+        # here. Keep the one-time token briefly and save it right after login here.
+        session["pending_kite_request_token"] = request.args["request_token"]
+        session["pending_kite_at"] = time.time()
+        return redirect(url_for("login_page", kite="pending"))
+    if request.path.startswith(("/api/", "/stream-logs", "/logs")):
+        return jsonify({"ok": False, "msg": "login required"}), 401
+    return redirect(url_for("login_page"))
+
+
+ACCESS_TOKEN_SAVED_AT_KEY = "ACCESS_TOKEN_SAVED_AT"
+PENDING_KITE_TOKEN_MAX_AGE_SECONDS = 300
+
+
+def save_kite_access_token(access_token: str) -> None:
+    """Persist a new Kite access token together with when it was issued."""
+    saved_at = datetime.now(IST).isoformat(timespec="seconds")
+    os.environ["ACCESS_TOKEN"] = access_token
+    os.environ[ACCESS_TOKEN_SAVED_AT_KEY] = saved_at
+    write_env_var("ACCESS_TOKEN", access_token)
+    write_env_var(ACCESS_TOKEN_SAVED_AT_KEY, saved_at)
+
+
+def kite_token_status() -> dict:
+    """Describe the saved Kite token. Kite clears access tokens at 06:00 IST each day."""
+    load_env_file()  # pick up a token saved by another process (e.g. generate_token.py)
+    if not os.environ.get("ACCESS_TOKEN", "").strip():
+        return {"state": "missing", "message": "No Kite token saved. Click Open Kite Login."}
+    try:
+        saved = datetime.fromisoformat(os.environ.get(ACCESS_TOKEN_SAVED_AT_KEY, "").strip()).astimezone(IST)
+    except ValueError:
+        return {"state": "unknown", "message": "Kite token age unknown. Log in once to start tracking it."}
+    expires = saved.replace(hour=6, minute=0, second=0, microsecond=0)
+    if expires <= saved:
+        expires += timedelta(days=1)
+    status = {"saved_at": saved.isoformat(), "expires_at": expires.isoformat()}
+    if datetime.now(IST) >= expires:
+        return {**status, "state": "expired",
+                "message": f"Kite token from {saved:%d %b %H:%M} expired at {expires:%d %b %H:%M} IST. Click Open Kite Login."}
+    return {**status, "state": "valid",
+            "message": f"Kite token saved {saved:%d %b %H:%M} IST, valid until {expires:%d %b %H:%M} IST."}
+
+
+def safe_process_name(name):
+    """Strategy process names become file names; allow only plain identifiers."""
+    name = str(name or "").strip()
+    return name if SAFE_NAME_RE.fullmatch(name) else None
 
 
 def read_pid() -> int:
@@ -131,19 +236,44 @@ def log_path_for(name: str) -> str:
     return os.path.join(WORKDIR, f"strategy_{name}.log")
 
 
+def strategy_python_executable() -> str:
+    """Use the project's virtual environment for strategy subprocesses when available."""
+    venv_python = os.path.join(WORKDIR, "venv", "Scripts", "python.exe")
+    if os.path.isfile(venv_python):
+        return venv_python
+    return sys.executable or "python3"
+
+
+def strategy_process_options() -> dict:
+    """Create a Windows process group so Ctrl-Break reaches the strategy child."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {}
+
+
 def current_log_pointer_for(name: str) -> str:
     """File that stores the path to the active run log for a named strategy."""
+    return os.path.join(LOGS_DIR, f"strategy_{name}.logpath")
+
+
+def legacy_log_pointer_for(name: str) -> str:
+    """Return the pre-STRATEGY_LOG_DIR location for a pointer file."""
     return os.path.join(WORKDIR, f"strategy_{name}.logpath")
 
 
 def get_active_log_path(name: str) -> str:
     """Return the current active log path from the pointer file, fallback to legacy path."""
     pointer = current_log_pointer_for(name)
+    legacy_pointer = legacy_log_pointer_for(name)
+    pointer_to_read = pointer if os.path.exists(pointer) else legacy_pointer
     try:
-        if os.path.exists(pointer):
-            with open(pointer, "r", encoding="utf-8") as f:
+        if os.path.exists(pointer_to_read):
+            with open(pointer_to_read, "r", encoding="utf-8") as f:
                 p = f.read().strip()
             if p:
+                if pointer_to_read == legacy_pointer and pointer != legacy_pointer:
+                    os.makedirs(LOGS_DIR, exist_ok=True)
+                    os.replace(legacy_pointer, pointer)
                 return p
     except Exception:
         pass
@@ -154,6 +284,7 @@ def set_active_log_path(name: str, path: str) -> None:
     """Persist the active log path so all routes can find the current run's log."""
     pointer = current_log_pointer_for(name)
     try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
         with open(pointer, "w", encoding="utf-8") as f:
             f.write(path)
     except Exception:
@@ -176,9 +307,9 @@ def build_run_log_filename(name: str, mode: str, dt: datetime = None) -> str:
     date_str = dt.strftime("%d%m%Y")
     # Backtest filenames omit the time component (matches Excel output naming)
     if prefix == "backtest":
-        return f"{prefix}_{date_str}_{name}_main.txt"
+        return f"{prefix}_{date_str}_{name}.txt"
     time_str = dt.strftime("%H%M%S")
-    return f"{prefix}_{date_str}_{time_str}_{name}_main.txt"
+    return f"{prefix}_{date_str}_{time_str}_{name}.txt"
 
 
 def mode_path_for(name: str) -> str:
@@ -263,11 +394,56 @@ def is_running() -> bool:
     return running
 
 
+def claim_start_slot(pidfile: str) -> str:
+    """Atomically reserve a strategy start slot before spawning its process."""
+    claim_file = f"{pidfile}.starting"
+    try:
+        fd = os.open(claim_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return claim_file
+    except FileExistsError:
+        raise RuntimeError("already_running")
+
+
+def live_strategy_lock_is_held(script: str) -> bool:
+    """Check the shared LIVE_ORDER lock without starting a child."""
+    lock_path = os.path.join(SCRIPTS_DIR, "live_order_strategy.lock")
+    handle = None
+    try:
+        handle = open(lock_path, "a+", encoding="utf-8")
+        handle.seek(0)
+        if not handle.read(1):
+            handle.seek(0)
+            handle.write(" ")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+    except (OSError, IOError):
+        return False
+    finally:
+        if handle is not None:
+            handle.close()
+
+
 def start_strategy(args: list = None) -> tuple[bool, str]:
     if is_running():
         return False, "already_running"
     args = args or []
-    python = sys.executable or "python3"
+    python = strategy_python_executable()
     # Run child Python in unbuffered mode so prints appear immediately in redirected logs
     cmd = [python, "-u", STRATEGY_SCRIPT] + args
     logf = open(LOG_FILE, "a", buffering=1)
@@ -280,7 +456,15 @@ def start_strategy(args: list = None) -> tuple[bool, str]:
             pass
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        proc = subprocess.Popen(cmd, cwd=WORKDIR, stdout=logf, stderr=subprocess.STDOUT, env=env, close_fds=True)
+        proc = subprocess.Popen(
+            cmd,
+            cwd=WORKDIR,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            env=env,
+            close_fds=True,
+            **strategy_process_options(),
+        )
         write_pid(proc.pid)
         # close parent handle; child keeps the descriptor
         try:
@@ -295,19 +479,26 @@ def start_strategy(args: list = None) -> tuple[bool, str]:
 def start_named_strategy(name: str, script: str, args: list = None, mode: str = "") -> tuple[bool, str]:
     args = args or []
     pidfile = pid_path_for(name)
+    claim_file = None
     # check if already running
     try:
         if os.path.exists(pidfile):
             with open(pidfile, 'r', encoding='utf-8') as f:
                 pid = int(f.read().strip() or 0)
             if is_pid_running(pid):
-                return False, 'already_running'
+                return True, f"resumed:{pid}"
             try:
                 os.remove(pidfile)
             except Exception:
                 pass
     except Exception:
         pass
+    if str(mode or "").upper() == "LIVE_ORDER" and live_strategy_lock_is_held(script):
+        return True, "resumed:existing-live-session"
+    try:
+        claim_file = claim_start_slot(pidfile)
+    except RuntimeError:
+        return True, "resumed:start-in-progress"
 
     # Build a timestamped log file in the logs/ folder (same naming as backtest/papertrade xlsx)
     now_ist = datetime.now(IST)
@@ -316,7 +507,7 @@ def start_named_strategy(name: str, script: str, args: list = None, mode: str = 
     logfile = os.path.join(LOGS_DIR, log_filename)
     set_active_log_path(name, logfile)
 
-    python = sys.executable or "python3"
+    python = strategy_python_executable()
     cmd = [python, "-u", script] + args
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -333,7 +524,15 @@ def start_named_strategy(name: str, script: str, args: list = None, mode: str = 
             logf.flush()
         except Exception:
             pass
-        proc = subprocess.Popen(cmd, cwd=WORKDIR, stdout=logf, stderr=subprocess.STDOUT, env=env, close_fds=True)
+        proc = subprocess.Popen(
+            cmd,
+            cwd=WORKDIR,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            env=env,
+            close_fds=True,
+            **strategy_process_options(),
+        )
         try:
             with open(pidfile, 'w', encoding='utf-8') as pf:
                 pf.write(str(proc.pid))
@@ -344,8 +543,17 @@ def start_named_strategy(name: str, script: str, args: list = None, mode: str = 
             logf.close()
         except Exception:
             pass
+        try:
+            os.remove(claim_file)
+        except Exception:
+            pass
         return True, f"started:{proc.pid}"
     except Exception as e:
+        if claim_file:
+            try:
+                os.remove(claim_file)
+            except Exception:
+                pass
         return False, str(e)
 
 
@@ -466,20 +674,129 @@ def stop_named_strategy(name: str) -> tuple[bool, str]:
 def index():
     if not session.get("logged_in"):
         return redirect(url_for("login_page"))
-    return render_template("index.html")
+    return render_template(
+        "index.html",
+        client_ip=local_server_ip(),
+        server_time=ist_now_str(),
+        server_time_epoch=time.time(),
+    )
+
+
+@app.route("/api/editable-config", methods=["GET", "POST"])
+def api_editable_config():
+    if not session.get("logged_in"):
+        return jsonify({"ok": False, "msg": "login required"}), 401
+    if request.method == "GET":
+        return jsonify({"ok": True, "config": load_editable_config()})
+    try:
+        data = request.get_json() or {}
+        config = save_editable_config(data)
+        return jsonify({"ok": True, "config": config})
+    except (TypeError, ValueError, OSError) as exc:
+        return jsonify({"ok": False, "msg": str(exc)}), 400
+
+
+@app.route("/api/market/nifty50")
+def api_market_nifty50():
+    if not session.get("logged_in"):
+        return jsonify({"ok": False, "msg": "login required"}), 401
+
+    kite, kite_err = _build_kite_client_from_env()
+    if kite is None:
+        return jsonify({"ok": False, "msg": f"Live NIFTY 50 unavailable: {kite_err}"}), 400
+
+    try:
+        quote = kite.quote(["NSE:NIFTY 50"]).get("NSE:NIFTY 50") or {}
+        last_price = to_float(quote.get("last_price"), 0.0)
+        if last_price <= 0:
+            return jsonify({"ok": False, "msg": "Live NIFTY 50 quote is empty"}), 502
+        previous_close = to_float((quote.get("ohlc") or {}).get("close"), 0.0)
+        change = last_price - previous_close if previous_close > 0 else None
+        change_pct = (change / previous_close * 100) if previous_close > 0 else None
+        return jsonify({
+            "ok": True,
+            "symbol": "NIFTY 50",
+            "last_price": last_price,
+            "change": change,
+            "change_pct": change_pct,
+            "updated_at": ist_now_str(),
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "msg": f"Live NIFTY 50 fetch failed: {exc}"}), 502
+
+
+@app.route("/api/market/gift-nifty")
+def api_market_gift_nifty():
+    if not session.get("logged_in"):
+        return jsonify({"ok": False, "msg": "login required"}), 401
+
+    kite, kite_err = _build_kite_client_from_env()
+    if kite is None:
+        return jsonify({"ok": False, "msg": f"Gift Nifty unavailable: {kite_err}"}), 400
+
+    try:
+        quote_keys = ["NSEIX:GIFT NIFTY", "NSEIX:GIFTNIFTY"]
+        quotes = kite.quote(quote_keys)
+        quote = next((quotes.get(key) for key in quote_keys if quotes.get(key)), {})
+        last_price = to_float(quote.get("last_price"), 0.0)
+        if last_price <= 0:
+            return jsonify({"ok": False, "msg": "Gift Nifty quote is empty"}), 502
+        previous_close = to_float((quote.get("ohlc") or {}).get("close"), 0.0)
+        change = last_price - previous_close if previous_close > 0 else None
+        change_pct = (change / previous_close * 100) if previous_close > 0 else None
+        return jsonify({
+            "ok": True,
+            "symbol": "Gift Nifty",
+            "last_price": last_price,
+            "change": change,
+            "change_pct": change_pct,
+            "updated_at": ist_now_str(),
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "msg": f"Gift Nifty fetch failed: {exc}"}), 502
 
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
+    notice = ""
+    if session.get("pending_kite_request_token"):
+        notice = (
+            f"Kite login returned to this dashboard address ({request.host}), but this browser "
+            "is not signed in here. Sign in to finish saving the Kite token. To avoid this, "
+            "open the dashboard at the same address as the Kite app's Redirect URL."
+        )
     if request.method == "POST":
+        client = request.remote_addr or "unknown"
+        now = time.time()
+        with _login_failures_lock:
+            failures, locked_until = _login_failures.get(client, (0, 0.0))
+        if locked_until > now:
+            wait_min = int((locked_until - now) // 60) + 1
+            return render_template("login.html", error=f"Too many failed attempts. Try again in {wait_min} minute(s).", notice=notice), 429
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
-        if username == LOGIN_USERNAME and password == LOGIN_PASSWORD:
+        # Check both fields every time so a wrong username takes as long as a wrong password.
+        user_ok = hmac.compare_digest(username.encode(), LOGIN_USERNAME.encode())
+        password_ok = check_password_hash(LOGIN_PASSWORD_HASH, password)
+        if user_ok and password_ok:
+            with _login_failures_lock:
+                _login_failures.pop(client, None)
+            pending_token = session.get("pending_kite_request_token")
+            pending_age = now - float(session.get("pending_kite_at") or 0)
+            session.clear()
+            session.permanent = True
             session["logged_in"] = True
+            if pending_token and pending_age <= PENDING_KITE_TOKEN_MAX_AGE_SECONDS:
+                return redirect(url_for("kite_callback", request_token=pending_token))
             return redirect(url_for("index"))
-        return render_template("login.html", error="Invalid username or password")
+        with _login_failures_lock:
+            failures += 1
+            _login_failures[client] = (
+                (0, now + LOGIN_LOCKOUT_SECONDS) if failures >= LOGIN_MAX_FAILURES else (failures, 0.0)
+            )
+        return render_template("login.html", error="Invalid username or password", notice=notice)
     if session.get("logged_in"):
         return redirect(url_for("index"))
-    return render_template("login.html", error="")
+    return render_template("login.html", error="", notice=notice)
 
 
 @app.route("/logout", methods=["POST"])
@@ -491,6 +808,8 @@ def logout():
 @app.route("/api/status")
 def api_status():
     name = request.args.get('name')
+    if name and not safe_process_name(name):
+        return jsonify({"ok": False, "msg": "invalid name"}), 400
     mode = ""
     if name:
         pidfile = pid_path_for(name)
@@ -536,32 +855,95 @@ def api_status():
     at = os.environ.get("ACCESS_TOKEN", "")
     at_mask = "" if not at else (at[:6] + "..." + at[-6:])
     api_key = os.environ.get("API_KEY", "")
-    return jsonify({"running": running, "pid": pid, "mode": mode, "log": log_info, "access_token_masked": at_mask, "api_key_present": bool(api_key)})
+    return jsonify({"running": running, "pid": pid, "mode": mode, "log": log_info, "access_token_masked": at_mask,
+                    "api_key_present": bool(api_key), "kite_token": kite_token_status()})
+
+
+# The only scripts the dashboard may start, and the options it may pass. The
+# request must never choose an arbitrary program or interpreter flag.
+STRATEGY_SCRIPTS = {"scripts/v28_strategy_main.py", "scripts/v30_strategy_main.py"}
+ALLOWED_START_SCRIPTS = STRATEGY_SCRIPTS | {
+    "scripts/nifty_weekly_options_daily_files_only.py",
+    "scripts/run_backtest_range.py",
+}
+ALLOWED_START_FLAGS = {
+    "--option-data-source", "--start-date", "--end-date", "--expiry-date",
+    "--strategy", "--after-hours-replay",
+}
+ALLOWED_MODES = {"BACKTEST", "PAPERTRADE_LIVE", "LIVE_ORDER"}
+SAFE_ARG_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,80}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def normalize_start_script(script) -> str:
+    rel = os.path.normpath(str(script or "")).replace("\\", "/")
+    return rel if rel in ALLOWED_START_SCRIPTS else ""
+
+
+def validate_start_args(args) -> str:
+    """Return an error message, or "" when every argument is allowed."""
+    if not isinstance(args, list) or len(args) > 20:
+        return "args must be a short list"
+    previous = ""
+    for arg in args:
+        if not isinstance(arg, str) or not SAFE_ARG_RE.fullmatch(arg):
+            return f"invalid argument: {arg!r}"
+        if arg.startswith("-") and arg not in ALLOWED_START_FLAGS:
+            return f"option not allowed: {arg}"
+        if previous == "--strategy" and normalize_start_script(arg) not in STRATEGY_SCRIPTS:
+            return f"strategy not allowed: {arg}"
+        previous = arg
+    return ""
 
 
 @app.route("/api/start", methods=["POST"])
 def api_start():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     # Support multi-strategy: { name, script, mode, date, args }
     name = data.get('name')
+    if name and not safe_process_name(name):
+        return jsonify({"ok": False, "msg": "invalid name"}), 400
     script = data.get('script')
-    args = []
-    if isinstance(data.get("args"), list):
-        args.extend(data.get("args"))
-    mode = data.get("mode")
+    if script:
+        script = normalize_start_script(script)
+        if not script:
+            return jsonify({"ok": False, "msg": "script not allowed"}), 400
+        script = os.path.join(WORKDIR, script)
+    args = list(data.get("args") or [])
+    args_error = validate_start_args(args)
+    if args_error:
+        return jsonify({"ok": False, "msg": args_error}), 400
+    # Every mode needs Kite (backtests fetch the NIFTY 50 index from it), so do not
+    # start a process that would only fail at its first API call.
+    token = kite_token_status()
+    if token["state"] in {"missing", "expired"}:
+        return jsonify({"ok": False, "msg": token["message"]}), 409
+    mode = str(data.get("mode") or "").strip().upper()
     if mode:
-        args.extend(["--mode", str(mode)])
-    date = data.get("date")
+        if mode not in ALLOWED_MODES:
+            return jsonify({"ok": False, "msg": "invalid mode"}), 400
+        args.extend(["--mode", mode])
+    date = str(data.get("date") or "").strip()
     if date:
-        args.extend(["--date", str(date)])
+        if not DATE_RE.fullmatch(date):
+            return jsonify({"ok": False, "msg": "invalid date"}), 400
+        args.extend(["--date", date])
     if name:
         # if script not supplied, default to STRATEGY_SCRIPT
         if not script:
             script = STRATEGY_SCRIPT
-        ok, msg = start_named_strategy(name, script, args, mode=str(mode or ""))
+        ok, msg = start_named_strategy(name, script, args, mode=mode)
     else:
         ok, msg = start_strategy(args)
-    return jsonify({"ok": ok, "msg": msg})
+    pid = 0
+    if ok and name:
+        pid = read_pid() if name == "" else 0
+        try:
+            with open(pid_path_for(name), "r", encoding="utf-8") as pf:
+                pid = int(pf.read().strip() or 0)
+        except Exception:
+            pid = 0
+    return jsonify({"ok": ok, "msg": msg, "pid": pid})
 
 
 def tail_file(path: str, lines: int = 200) -> str:
@@ -756,6 +1138,29 @@ def to_float(value, default=0.0) -> float:
         return float(default)
 
 
+def mtf_interval_from_gap_pct(gap_pct) -> str:
+    editable_config = load_editable_config()
+    if editable_config.get("MTF_MODE") == "MANUAL":
+        return str(editable_config.get("MTF_INTERVAL") or "")
+    try:
+        gap_value = float(gap_pct)
+    except (TypeError, ValueError):
+        return ""
+    return "1min" if abs(gap_value) < 0.20 else "5min"
+
+
+def cpr_type_from_width_pct(width_pct) -> str:
+    try:
+        width_value = float(width_pct)
+    except (TypeError, ValueError):
+        return ""
+    if width_value < 0.10:
+        return "NARROW"
+    if width_value <= 0.20:
+        return "NORMAL"
+    return "WIDE"
+
+
 def _extract_trade_date_from_filename(safe_name: str) -> str:
     """Extract YYYY-MM-DD from names like backtest_ddmmyyyy_*.xlsx."""
     name = os.path.basename(str(safe_name or "")).strip().lower()
@@ -771,6 +1176,34 @@ def _extract_trade_date_from_filename(safe_name: str) -> str:
 
 def _read_trade_date_from_summary_sheet(path: str) -> str:
     if pd is None:
+        return ""
+    try:
+        df = pd.read_excel(path, sheet_name="summary")
+    except Exception:
+        return ""
+    if df is None or df.empty:
+        return ""
+
+    cols = [str(c).strip().lower() for c in df.columns]
+    metric_col = None
+    value_col = None
+    for idx, col in enumerate(cols):
+        if col == "metric":
+            metric_col = df.columns[idx]
+        if col == "value":
+            value_col = df.columns[idx]
+    if metric_col is None or value_col is None:
+        return ""
+
+    try:
+        row = df[df[metric_col].astype(str).str.strip().str.lower() == "trade_date"].head(1)
+        if row.empty:
+            return ""
+        raw = str(row.iloc[0][value_col]).strip()
+        if not raw:
+            return ""
+        return datetime.fromisoformat(raw).date().isoformat()
+    except Exception:
         return ""
 
 
@@ -806,6 +1239,10 @@ def _read_summary_market_context(path: str) -> dict:
         for key in SUMMARY_MARKET_CONTEXT_FIELDS:
             val = metric_map.get(key.lower(), "")
             out[key] = "" if val is None else val
+        if out.get("cpr_width_pct", "") != "":
+            derived_cpr_type = cpr_type_from_width_pct(out["cpr_width_pct"])
+            if derived_cpr_type:
+                out["cpr_type"] = derived_cpr_type
     except Exception:
         pass
     return out
@@ -832,36 +1269,6 @@ def _merge_market_context(contexts: list[dict]) -> dict:
         else:
             merged[key] = "MULTIPLE"
     return merged
-    try:
-        df = pd.read_excel(path, sheet_name="summary")
-    except Exception:
-        return ""
-    if df is None or df.empty:
-        return ""
-
-    cols = [str(c).strip().lower() for c in df.columns]
-    metric_col = None
-    value_col = None
-    for idx, col in enumerate(cols):
-        if col == "metric":
-            metric_col = df.columns[idx]
-        if col == "value":
-            value_col = df.columns[idx]
-    if metric_col is None or value_col is None:
-        return ""
-
-    try:
-        row = df[df[metric_col].astype(str).str.strip().str.lower() == "trade_date"].head(1)
-        if row.empty:
-            return ""
-        raw = str(row.iloc[0][value_col]).strip()
-        if not raw:
-            return ""
-        return datetime.fromisoformat(raw).date().isoformat()
-    except Exception:
-        return ""
-
-
 def _build_kite_client_from_env() -> tuple[object, str]:
     if KiteConnect is None:
         return None, "kiteconnect_not_installed"
@@ -1014,12 +1421,7 @@ def _fetch_gap_from_broker_for_date(kite, trade_date: str, token: int) -> tuple[
             bc, tc = tc, bc
         width = tc - bc
         width_pct = ((width / pivot) * 100.0) if pivot else 0.0
-        if width_pct < 0.30:
-            cpr_type = "NARROW"
-        elif width_pct < 0.70:
-            cpr_type = "MODERATE"
-        else:
-            cpr_type = "WIDE"
+        cpr_type = cpr_type_from_width_pct(width_pct)
         cpr_pivot = int(round(pivot))
         cpr_bc = int(round(bc))
         cpr_tc = int(round(tc))
@@ -1093,6 +1495,7 @@ def _write_gap_to_summary_sheet(path: str, gap: dict) -> tuple[bool, str]:
         "nifty_change": gap.get("nifty_change"),
         "gap_type": gap.get("gap_type"),
         "gap_points": gap.get("gap_points"),
+        "gap_pct": gap.get("gap_pct"),
         "is_gap_up": gap.get("is_gap_up"),
         "gap_prev_trade_date": gap.get("prev_trade_date"),
         "gap_data_source": "broker_history",
@@ -1119,13 +1522,88 @@ def _write_gap_to_summary_sheet(path: str, gap: dict) -> tuple[bool, str]:
 @app.route("/api/logs")
 def api_logs():
     name = request.args.get('name')
+    if name and not safe_process_name(name):
+        return jsonify({"ok": False, "msg": "invalid name"}), 400
+    full = request.args.get('full', '').lower() == 'true'
     path = LOG_FILE
     if name:
         path = get_active_log_path(name)
     if not os.path.exists(path):
         return jsonify({"exists": False, "tail": ""})
-    tail = tail_file(path, lines=500)
-    return jsonify({"exists": True, "tail": tail})
+    
+    if full:
+        # Return the entire log file
+        try:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            return jsonify({"exists": True, "tail": content})
+        except Exception as e:
+            return jsonify({"exists": False, "tail": f"Error reading log: {str(e)}"})
+    else:
+        # Return last 2000 lines for initial display
+        tail = tail_file(path, lines=2000)
+        return jsonify({"exists": True, "tail": tail})
+
+
+@app.route("/api/weekly-options/files")
+def api_weekly_options_files():
+    output_dir = os.path.join(WORKDIR, "data", "nifty_options", "daily")
+    expiry = request.args.get("expiry", "").strip()
+    if expiry and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", expiry):
+        return jsonify({"ok": False, "msg": "Invalid expiry date."}), 400
+    if not os.path.isdir(output_dir):
+        return jsonify({"ok": True, "files": []})
+
+    files = [
+        name for name in os.listdir(output_dir)
+        if name.lower().endswith(".csv")
+        and (not expiry or re.match(r"^nifty_weekly_" + re.escape(expiry) + r"_", name))
+        and os.path.isfile(os.path.join(output_dir, name))
+    ]
+    files = sorted(files)
+    file_sizes_mb = {
+        name: round(os.path.getsize(os.path.join(output_dir, name)) / (1024 * 1024), 2)
+        for name in files
+    }
+    return jsonify({"ok": True, "files": files, "file_sizes_mb": file_sizes_mb})
+
+
+@app.route("/api/weekly-options/files/download")
+def api_weekly_options_file_download():
+    name = os.path.basename((request.args.get("file") or "").strip())
+    if not name or name != request.args.get("file"):
+        return jsonify({"ok": False, "msg": "Invalid file name"}), 400
+    if not name.lower().endswith(".csv"):
+        return jsonify({"ok": False, "msg": "Only CSV files can be downloaded"}), 400
+    path = os.path.join(WORKDIR, "data", "nifty_options", "daily", name)
+    if not os.path.isfile(path):
+        return jsonify({"ok": False, "msg": "File not found"}), 404
+    return send_file(path, as_attachment=True, download_name=name)
+
+
+@app.route("/api/weekly-options/files/delete", methods=["POST"])
+def api_weekly_options_file_delete():
+    data = request.get_json() or {}
+    files = data.get("files")
+    if not isinstance(files, list) or not files:
+        return jsonify({"ok": False, "msg": "Select at least one CSV file"}), 400
+
+    deleted = []
+    failed = []
+    daily_dir = os.path.join(WORKDIR, "data", "nifty_options", "daily")
+    for raw_name in files:
+        name = os.path.basename(str(raw_name or "").strip())
+        if name != str(raw_name or "").strip() or not name.lower().endswith(".csv"):
+            continue
+        path = os.path.join(daily_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+            deleted.append(name)
+        except OSError as exc:
+            failed.append({"file": name, "msg": str(exc)})
+    return jsonify({"ok": not failed, "deleted": deleted, "failed": failed})
 
 
 @app.route('/api/log-files')
@@ -1363,7 +1841,7 @@ def parse_trade_details_from_xlsx(safe_name: str, row_limit: int = 200) -> tuple
         total_pnl_points = float(pnl_points.sum())
 
     preferred_cols = [
-        'entry_time', 'exit_time', 'side', 'option_symbol',
+        'entry_time', 'entry_reason', 'exit_time', 'side', 'option_symbol',
         'entry_spot', 'signal_spot_price', 'exit_spot',
         'entry_price', 'high_during_trade', 'exit_price', 'pnl_points', 'pnl_rs', 'exit_reason'
     ]
@@ -1476,6 +1954,8 @@ def api_log_files_trade_details_consolidated():
                 "ok": True,
                 "sheet": payload.get('sheet', ''),
                 "total_rows": int(payload.get('total_rows') or 0),
+                "total_pnl_rs": to_float(summary.get('total_pnl_rs'), 0.0),
+                "total_pnl_points": to_float(summary.get('total_pnl_points'), 0.0),
                 "market_context": market_context,
             })
         except Exception as e:
@@ -1505,6 +1985,60 @@ def api_log_files_trade_details_consolidated():
         },
         "market_context": _merge_market_context(market_context_list),
         "rows": all_rows[-600:],
+    })
+
+
+@app.route('/api/log-files/gap-details')
+def api_log_files_gap_details():
+    if not session.get("logged_in"):
+        return jsonify({"ok": False, "msg": "Unauthorized"}), 401
+
+    from_date = (request.args.get("from") or "").strip()
+    to_date = (request.args.get("to") or "").strip()
+    try:
+        start_date = datetime.fromisoformat(from_date).date()
+        end_date = datetime.fromisoformat(to_date).date()
+    except ValueError:
+        return jsonify({"ok": False, "msg": "Use valid From and To dates"}), 400
+    if start_date > end_date:
+        return jsonify({"ok": False, "msg": "From date cannot be after To date"}), 400
+
+    kite, kite_err = _build_kite_client_from_env()
+    if kite is None:
+        return jsonify({"ok": False, "msg": f"Cannot fetch broker gap data: {kite_err}"}), 400
+
+    token = int(to_float(os.environ.get("BROKER_GAP_UNDERLYING_TOKEN", "256265"), 256265))
+    reports = []
+    current_date = start_date
+    while current_date <= end_date:
+        if current_date.weekday() < 5:
+            trade_date = current_date.isoformat()
+            gap, gap_err = _fetch_gap_from_broker_for_date(kite, trade_date, token)
+            if gap:
+                reports.append({
+                    "file": trade_date,
+                    "ok": True,
+                    "trade_date": trade_date,
+                    "market_context": {
+                        **gap,
+                        "mtf_interval": mtf_interval_from_gap_pct(gap.get("gap_pct")),
+                    },
+                })
+            else:
+                reports.append({
+                    "file": trade_date,
+                    "ok": False,
+                    "trade_date": trade_date,
+                    "msg": gap_err or "gap_fetch_failed",
+                    "market_context": {},
+                })
+        current_date += timedelta(days=1)
+
+    return jsonify({
+        "ok": True,
+        "from_date": from_date,
+        "to_date": to_date,
+        "reports": reports,
     })
 
 
@@ -1569,10 +2103,16 @@ def api_log_files_update_gap_summary():
             "gap_points": gap.get("gap_points"),
         })
 
+    failed_messages = [
+        f"{report.get('file')}: {report.get('msg')}"
+        for report in reports
+        if not report.get("ok") and report.get("msg")
+    ]
     return jsonify({
         "ok": updated > 0,
         "updated": updated,
         "total": len(selected),
+        "msg": "All selected files failed: " + "; ".join(failed_messages) if updated == 0 and failed_messages else "",
         "reports": reports,
     })
 
@@ -1581,6 +2121,8 @@ def api_log_files_update_gap_summary():
 def api_stop():
     data = request.get_json() or {}
     name = data.get('name')
+    if name and not safe_process_name(name):
+        return jsonify({"ok": False, "msg": "invalid name"}), 400
     log_path = LOG_FILE
     if name:
         log_path = get_active_log_path(name)
@@ -1607,9 +2149,43 @@ def api_stop():
     return jsonify(response)
 
 
+@app.route("/api/stop-all", methods=["POST"])
+def api_stop_all():
+    """Gracefully stop all strategy processes managed by this application."""
+    reports = []
+    for name in ("live_order_only", "v28", "v30", "weekly_options_download"):
+        ok, msg = stop_named_strategy(name)
+        reports.append({"name": name, "ok": ok, "msg": msg})
+
+    legacy_ok, legacy_msg = stop_strategy()
+    if legacy_ok or legacy_msg != "not_running":
+        reports.append({"name": "legacy", "ok": legacy_ok, "msg": legacy_msg})
+
+    stopped = [item["name"] for item in reports if item["ok"]]
+    failures = [
+        item for item in reports
+        if not item["ok"] and item["msg"] not in {"not_running"}
+    ]
+    if failures:
+        return jsonify({
+            "ok": False,
+            "msg": "Some managed strategy processes could not be stopped.",
+            "stopped": stopped,
+            "reports": reports,
+        }), 500
+    return jsonify({
+        "ok": True,
+        "msg": "All managed strategy processes stopped." if stopped else "No managed strategy process was running.",
+        "stopped": stopped,
+        "reports": reports,
+    })
+
+
 @app.route("/logs")
 def view_logs():
     name = request.args.get('name')
+    if name and not safe_process_name(name):
+        return jsonify({"ok": False, "msg": "invalid name"}), 400
     path = LOG_FILE
     if name:
         path = get_active_log_path(name)
@@ -1622,6 +2198,8 @@ def view_logs():
 @app.route('/stream-logs')
 def stream_logs():
     name = request.args.get('name')
+    if name and not safe_process_name(name):
+        return jsonify({"ok": False, "msg": "invalid name"}), 400
     path = LOG_FILE
     if name:
         path = get_active_log_path(name)
@@ -1653,6 +2231,8 @@ def stream_logs():
 def api_clear_logs():
     data = request.get_json() or {}
     name = data.get('name')
+    if name and not safe_process_name(name):
+        return jsonify({"ok": False, "msg": "invalid name"}), 400
     path = LOG_FILE
     if name:
         path = get_active_log_path(name)
@@ -1668,6 +2248,7 @@ def api_clear_logs():
 
 @app.route('/api/kite/login_url')
 def api_kite_login_url():
+    load_env_file()
     api_key = os.environ.get("API_KEY", "").strip()
     if KiteConnect is None:
         return jsonify({"ok": False, "msg": "kiteconnect library not installed. Install with: pip install kiteconnect"}), 400
@@ -1701,6 +2282,7 @@ def kite_callback():
     request_token = request.args.get('request_token')
     if not request_token:
         return "Missing request_token in callback", 400
+    load_env_file()
     api_key = os.environ.get("API_KEY", "").strip()
     api_secret = os.environ.get("API_SECRET", "").strip()
     if not api_key or not api_secret:
@@ -1710,11 +2292,13 @@ def kite_callback():
     try:
         kite = KiteConnect(api_key=api_key)
         data = kite.generate_session(request_token, api_secret=api_secret)
-        access_token = data.get('access_token') or data.get('access_token')
+        access_token = data.get('access_token')
         if access_token:
-            os.environ['ACCESS_TOKEN'] = access_token
-            write_env_var('ACCESS_TOKEN', access_token)
-            return f"Access token generated and saved (masked): {access_token[:6]}...{access_token[-6:]}"
+            save_kite_access_token(access_token)
+            return (
+                f"Kite token saved on this dashboard ({request.host}): {access_token[:6]}...{access_token[-6:]}. "
+                f"{kite_token_status()['message']} You can close this tab."
+            )
         return "Failed to obtain access token: " + str(data)
     except Exception as e:
         return str(e), 500
@@ -1724,6 +2308,7 @@ def kite_callback():
 def api_kite_exchange():
     data = request.get_json() or {}
     request_token = data.get('request_token')
+    load_env_file()
     api_key = os.environ.get("API_KEY", "").strip()
     api_secret = os.environ.get("API_SECRET", "").strip()
     if not request_token or not api_key or not api_secret or KiteConnect is None:
@@ -1733,9 +2318,9 @@ def api_kite_exchange():
         res = kite.generate_session(request_token, api_secret=api_secret)
         access_token = res.get('access_token')
         if access_token:
-            os.environ['ACCESS_TOKEN'] = access_token
-            write_env_var('ACCESS_TOKEN', access_token)
-            return jsonify({"ok": True, "access_token_masked": access_token[:6] + '...' + access_token[-6:]})
+            save_kite_access_token(access_token)
+            return jsonify({"ok": True, "access_token_masked": access_token[:6] + '...' + access_token[-6:],
+                            "kite_token": kite_token_status()})
         return jsonify({"ok": False, "msg": str(res)})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)})

@@ -21,8 +21,12 @@ def check_kite_login():
         print(f"  User Name: {profile.get('user_name')}")
         print(f"  Email: {profile.get('email')}")
         print(f"  Broker: {profile.get('broker')}")
+
+        print("\n[Test 2] Fetching account margins...")
+        kite.margins()
+        print("[OK] Authenticated account request succeeded.")
         
-        # Test 2: Check if we can fetch instruments
+        # Test 3: Check if we can fetch instruments
         # print("\n[Test 2] Fetching instruments list...")
         # instruments = kite.instruments()
         # print(f"[OK] Total instruments available: {len(instruments)}")
