@@ -6490,10 +6490,13 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                     or (ts - last_symbol_refresh_ts) >= _refresh_interval
                 )
                 if _refresh_due:
+                    # Set before the try/kite check: the [STRIKE AUDIT] print below uses it.
+                    _spot = float(row["spot_close"])
                     try:
                         _kite = globals().get("kite")
-                        if _kite is not None:
-                            _spot = float(row["spot_close"])
+                        # Downloaded-CSV backtests select strikes from local files and never
+                        # use kite, so they no longer depend on main() having set it.
+                        if _kite is not None or BACKTEST_OPTION_DATA_SOURCE == "DOWNLOADED":
                             if run_mode == "BACKTEST" and BACKTEST_OPTION_DATA_SOURCE == "DOWNLOADED":
                                 _new_ce, _new_pe = select_downloaded_option_symbols(
                                     day.rename(columns={"spot_ts": "ts", "spot_close": "close"}),

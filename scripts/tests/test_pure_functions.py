@@ -76,8 +76,11 @@ class VariantSettingsTests(unittest.TestCase):
         self.assertEqual(m.ENTRY_SCORE_THRESHOLD, 4)
         self.assertEqual(m.TRAILING_PROFIT_STAGE1[:2], [(25, 15), (30, 20)])
         self.assertEqual(len(m.TRAILING_PROFIT_STAGE1), 16)
-        # Same list object on purpose: the engine compares ladders with `is`.
-        self.assertIs(m.TRAILING_PROFIT_STAGE1, m.TRAILING_PROFIT_STAGE2)
+        # Same values all day, but a separate list so logs show S1 before 10:30 and S2 after.
+        self.assertEqual(m.TRAILING_PROFIT_STAGE1, m.TRAILING_PROFIT_STAGE2)
+        self.assertIsNot(m.TRAILING_PROFIT_STAGE1, m.TRAILING_PROFIT_STAGE2)
+        self.assertEqual(m.get_trailing_profit_status(26.0, "10:00"), "S1:1:25->15")
+        self.assertEqual(m.get_trailing_profit_status(26.0, "10:45"), "S2:1:25->15")
 
     def test_shared_settings_identical(self):
         differing = {"LOG_IDENTIFIER", "ENTRY_SCORE_THRESHOLD", "TRAILING_PROFIT_STAGE1", "TRAILING_PROFIT_STAGE2", "_VARIANT", "_cli"}
