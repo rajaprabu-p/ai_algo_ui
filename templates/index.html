@@ -321,6 +321,32 @@
       .log-files-actions button {
         margin-right: 0;
       }
+
+      /* Phones and narrow windows: everything fits the screen width (desktop unchanged). */
+      @media (max-width: 700px) {
+        body { margin: 0.75rem; }
+        .page-header { flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.6rem; }
+        .page-title { font-size: 1.5rem; }
+        .site-keywords { gap: 0.4rem; margin: 0 0 0.8rem; }
+        details.section > summary { font-size: 1rem; padding: 0.7rem 0.8rem; }
+        .section-body { padding: 0.25rem 0.6rem 0.6rem; }
+        .grid, .today-grid { grid-template-columns: minmax(0, 1fr); }
+        .card { padding: 0.65rem; }
+        /* Tap-sized buttons that wrap instead of running off the edge. */
+        button { min-height: 40px; padding: 0.55rem 0.8rem; margin: 0 0.35rem 0.4rem 0; }
+        /* Inline label indents waste width on a phone; labels wrap neatly instead. */
+        label { margin-left: 0 !important; margin-right: 0.6rem; display: inline-block; margin-bottom: 0.35rem; }
+        input, select, textarea { max-width: 100%; box-sizing: border-box; }
+        input[type="date"], input[type="number"], input[type="text"] { min-height: 36px; }
+        .log-files-layout { flex-direction: column; align-items: stretch; }
+        .log-files-list, .log-files-actions { width: 100%; }
+        .log-files-list select { min-width: 0; width: 100%; min-height: 200px; }
+        #weekly-options-files-expiry { width: 100%; }
+        /* Wide tables scroll inside their own box, never widen the page. */
+        .table-wrap, pre { max-width: 100%; }
+        .pnl-table { font-size: 0.85rem; }
+        .pnl-summary { gap: 0.4rem; }
+      }
     </style>
   </head>
   <body>

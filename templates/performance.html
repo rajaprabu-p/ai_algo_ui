@@ -70,8 +70,16 @@
     }
     .tooltip .v { font-weight: 700; font-size: 13px; color: var(--text-primary); }
     .tooltip .k { color: var(--text-secondary); }
-    .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
-    .grid-bd { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 12px; }
+    .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 12px; }
+    .grid-bd { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 12px; }
+    @media (max-width: 700px) {
+      body { padding: 12px; }
+      select#settings { max-width: 100%; width: 100%; }
+      .filters label:has(#settings) { flex-basis: 100%; }
+      .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .tile .value { font-size: 19px; }
+      button { min-height: 36px; }
+    }
     .grid-bd .card > div { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
     th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--grid); font-size: 13px; white-space: nowrap; }
