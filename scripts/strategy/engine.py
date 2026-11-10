@@ -220,13 +220,24 @@ BLOCK_SAME_SYMBOL_REENTRY_WITHIN_MINUTES = 5
 SAME_SYMBOL_MIN_REENTRY_DROP_POINTS = 20.0  # After a same-symbol exit, only re-enter if option price is at least this many points below the previous exit price (0 = disabled)
 ENTRY_CONFIRM_DELAY_SECONDS = 2
 SIMULATE_LIVE_EXECUTION_IN_PAPERTRADE = False
-SIMULATE_LIVE_EXECUTION_IN_BACKTEST = False
+SIMULATE_LIVE_EXECUTION_IN_BACKTEST = True  # apply BACKTEST_*_SLIPPAGE_POINTS below to backtest fills
 PAPER_ENTRY_SLIPPAGE_MODE = "NONE"    # FIXED / PCT / NONE
 PAPER_ENTRY_SLIPPAGE_POINTS = 2.0
 PAPER_ENTRY_SLIPPAGE_PCT = 0.005
 PAPER_EXIT_SLIPPAGE_MODE = "NONE"     # FIXED / PCT / NONE
 PAPER_EXIT_SLIPPAGE_POINTS = 1.5
 PAPER_EXIT_SLIPPAGE_PCT = 0.004
+# Backtest fill realism (used only in BACKTEST mode; the PAPER_* settings above are for paper trading).
+BACKTEST_ENTRY_SLIPPAGE_POINTS = 1.0  # buys fill this many points above the signal price
+BACKTEST_EXIT_SLIPPAGE_POINTS = 1.0   # sells fill this many points below the exit price
+# Zerodha NIFTY options charges per executed order, used for the backtest's charges_rs /
+# net_pnl_rs columns. Rates change: verify against zerodha.com/charges or a contract note.
+OPTION_BROKERAGE_PER_ORDER_RS = 20.0  # flat per executed order (buy and sell each)
+OPTION_STT_SELL_PCT = 0.15            # % of sell-side premium (reported Finance Act 2026 rate)
+OPTION_EXCHANGE_TXN_PCT = 0.03503     # NSE transaction charge, % of premium, both sides
+OPTION_SEBI_PER_CRORE_RS = 10.0       # SEBI turnover fee, Rs per crore of premium, both sides
+OPTION_STAMP_BUY_PCT = 0.003          # stamp duty, % of buy-side premium
+OPTION_GST_PCT = 18.0                 # GST on brokerage + exchange + SEBI charges
 SIMULATE_INTRAMINUTE_EMERGENCY_SL = True
 SIMULATE_INTRAMINUTE_TARGET_HIT = True
 # Signal age is measured from the signal candle's start, so a normal entry is
@@ -1938,6 +1949,39 @@ def apply_paper_exit_slippage(signal_price: float, side: str = "SELL") -> float:
     return round_to_tick(max(OPTION_TICK_SIZE, slipped), OPTION_TICK_SIZE)
 
 
+def apply_backtest_entry_slippage(signal_price: float) -> float:
+    """Backtest buy fill: BACKTEST_ENTRY_SLIPPAGE_POINTS worse than the signal price."""
+    px = safe_float(signal_price, 0.0)
+    if px <= 0:
+        return px
+    return round_to_tick(px + safe_float(BACKTEST_ENTRY_SLIPPAGE_POINTS, 0.0), OPTION_TICK_SIZE)
+
+
+def apply_backtest_exit_slippage(exit_price: float) -> float:
+    """Backtest sell fill: BACKTEST_EXIT_SLIPPAGE_POINTS worse than the exit price (min one tick)."""
+    px = safe_float(exit_price, 0.0)
+    if px <= 0:
+        return px
+    return round_to_tick(max(OPTION_TICK_SIZE, px - safe_float(BACKTEST_EXIT_SLIPPAGE_POINTS, 0.0)), OPTION_TICK_SIZE)
+
+
+def option_round_trip_charges(entry_price: float, exit_price: float, qty: int) -> Dict[str, float]:
+    """Zerodha-style charges for one bought-then-sold options position (Rs, rounded to paise)."""
+    buy_value = max(0.0, safe_float(entry_price, 0.0)) * max(0, safe_int(qty, 0))
+    sell_value = max(0.0, safe_float(exit_price, 0.0)) * max(0, safe_int(qty, 0))
+    turnover = buy_value + sell_value
+    brokerage = 2.0 * safe_float(OPTION_BROKERAGE_PER_ORDER_RS, 0.0) if turnover > 0 else 0.0
+    stt = sell_value * safe_float(OPTION_STT_SELL_PCT, 0.0) / 100.0
+    exchange = turnover * safe_float(OPTION_EXCHANGE_TXN_PCT, 0.0) / 100.0
+    sebi = turnover * safe_float(OPTION_SEBI_PER_CRORE_RS, 0.0) / 1e7
+    stamp = buy_value * safe_float(OPTION_STAMP_BUY_PCT, 0.0) / 100.0
+    gst = (brokerage + exchange + sebi) * safe_float(OPTION_GST_PCT, 0.0) / 100.0
+    parts = {"brokerage": brokerage, "stt": stt, "exchange": exchange, "sebi": sebi, "stamp": stamp, "gst": gst}
+    parts = {k: round(v, 2) for k, v in parts.items()}
+    parts["total"] = round(sum(parts.values()), 2)
+    return parts
+
+
 def is_signal_too_old(signal_ts, now_ts) -> bool:
     if signal_ts is None or now_ts is None:
         return False
@@ -2438,6 +2482,7 @@ def build_backtest_summary_df(trades: pd.DataFrame, run_mode: str, day: pd.DataF
     losing_trades = 0
     total_points = 0.0
     total_rs = 0.0
+    total_charges = 0.0
     notes = ""
     guard_stop_reason = trades.attrs.get("guard_stop_reason") if hasattr(trades, "attrs") else ""
 
@@ -2449,6 +2494,8 @@ def build_backtest_summary_df(trades: pd.DataFrame, run_mode: str, day: pd.DataF
             winning_trades = int((trades["pnl_rs"] > 0).sum())
             losing_trades = int((trades["pnl_rs"] <= 0).sum())
             total_rs = float(trades["pnl_rs"].sum())
+        if "charges_rs" in trades.columns:
+            total_charges = float(trades["charges_rs"].sum())
         if "pnl_points" in trades.columns:
             total_points = float(trades["pnl_points"].sum())
 
@@ -2504,6 +2551,11 @@ def build_backtest_summary_df(trades: pd.DataFrame, run_mode: str, day: pd.DataF
         {"metric": "losing_or_flat_trades", "value": losing_trades},
         {"metric": "total_pnl_points", "value": round(total_points, 2)},
         {"metric": "total_pnl_rs", "value": round(total_rs, 2)},
+        {"metric": "total_charges_rs", "value": round(total_charges, 2)},
+        {"metric": "net_pnl_after_charges_rs", "value": round(total_rs - total_charges, 2)},
+        {"metric": "backtest_slippage_points", "value": (
+            f"entry {BACKTEST_ENTRY_SLIPPAGE_POINTS:g} / exit {BACKTEST_EXIT_SLIPPAGE_POINTS:g}"
+            if SIMULATE_LIVE_EXECUTION_IN_BACKTEST else "off")},
         {"metric": "guard_stop_reason", "value": guard_stop_reason or ""},
         {"metric": "auto_select_spot_ref", "value": str(AUTO_SELECT_SPOT_REF)},
         {"metric": "notes", "value": notes},
@@ -6716,7 +6768,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                 entry_option_token = safe_int(ce_token_override, 0)
                 entry_price = float(row["ce_close"])  # signal fires at candle close; enter at close price
                 if SIMULATE_LIVE_EXECUTION_IN_BACKTEST and run_mode == "BACKTEST":
-                    entry_price = apply_paper_entry_slippage(entry_price, side="BUY")
+                    entry_price = apply_backtest_entry_slippage(entry_price)
                 entry_ts = ts
                 entry_spot = float(row["spot_close"])
                 entry_number = safe_int(execution_entry_count, 0) + trade_count + 1
@@ -6753,7 +6805,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                 entry_option_token = safe_int(pe_token_override, 0)
                 entry_price = float(row["pe_close"])  # signal fires at candle close; enter at close price
                 if SIMULATE_LIVE_EXECUTION_IN_BACKTEST and run_mode == "BACKTEST":
-                    entry_price = apply_paper_entry_slippage(entry_price, side="BUY")
+                    entry_price = apply_backtest_entry_slippage(entry_price)
                 entry_ts = ts
                 entry_spot = float(row["spot_close"])
                 entry_number = safe_int(execution_entry_count, 0) + trade_count + 1
@@ -6919,9 +6971,12 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
 
             if exit_reason is not None:
                 if SIMULATE_LIVE_EXECUTION_IN_BACKTEST and run_mode == "BACKTEST":
-                    exit_price = apply_paper_exit_slippage(exit_price, side="SELL")
+                    exit_price = apply_backtest_exit_slippage(exit_price)
                 pnl_points = exit_price - entry_price
                 pnl_rs = pnl_points * QTY
+                # Charges are reported per trade (net_pnl_rs); risk guards keep using price P&L
+                # (pnl_rs), the same basis the live session measures MTM on.
+                trade_charges = option_round_trip_charges(entry_price, exit_price, QTY)
                 realized_mtm_rs += pnl_rs
 
                 # Profit-lock fix: count completed trades immediately after every exit
@@ -6980,6 +7035,8 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                     "qty": QTY,
                     "pnl_points": pnl_points,
                     "pnl_rs": pnl_rs,
+                    "charges_rs": trade_charges["total"],
+                    "net_pnl_rs": round(pnl_rs - trade_charges["total"], 2),
                     "realized_mtm_after_trade": cumulative_pnl,  # Cumulative P&L including this trade
                     "mtf_entry_label": day.loc[day["spot_ts"] == entry_ts, "mtf_label"].iloc[0],
                     "mtf_exit_label": row["mtf_label"],
@@ -7424,7 +7481,12 @@ def print_summary(trades: pd.DataFrame, run_mode: str, ce_symbol: str, pe_symbol
         print(f"Losing/flat trades : {loss_trades}")
         print(f"Total P&L (points) : {total_points:.2f}")
         print(f"Total P&L (Rs)     : {total_rs:.2f}")
-        print(f"Net P&L (Rs)       : {total_rs:.2f}")
+        total_charges = float(trades["charges_rs"].sum()) if "charges_rs" in trades.columns else 0.0
+        if "charges_rs" in trades.columns:
+            print(f"Charges (Rs)       : {total_charges:.2f}")
+        print(f"Net P&L (Rs)       : {total_rs - total_charges:.2f}")
+        if run_mode == "BACKTEST" and SIMULATE_LIVE_EXECUTION_IN_BACKTEST:
+            print(f"Slippage (points)  : entry {BACKTEST_ENTRY_SLIPPAGE_POINTS:g} / exit {BACKTEST_EXIT_SLIPPAGE_POINTS:g} (included above)")
         if guard_stop_reason:
             print(f"Trading stopped by : {guard_stop_reason}")
 

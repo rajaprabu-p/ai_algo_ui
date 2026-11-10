@@ -246,6 +246,36 @@ class GapAndContextTests(StrategyTestCase):
             self.assertEqual(m.build_market_context(day_without, prev_close=22776.0)["nifty_open"], 22621)
 
 
+class BacktestCostsTests(StrategyTestCase):
+    def test_slippage(self):
+        for m in self.each_module():
+            with mock.patch.multiple(m, BACKTEST_ENTRY_SLIPPAGE_POINTS=1.0, BACKTEST_EXIT_SLIPPAGE_POINTS=1.0):
+                self.assertEqual(m.apply_backtest_entry_slippage(108.30), 109.30)
+                self.assertEqual(m.apply_backtest_exit_slippage(83.30), 82.30)
+                self.assertEqual(m.apply_backtest_exit_slippage(0.50), 0.05)  # never below one tick
+                self.assertEqual(m.apply_backtest_entry_slippage(0), 0)
+
+    def test_round_trip_charges_match_hand_calculation(self):
+        # Buy 65 @ 100, sell 65 @ 125: buy 6,500, sell 8,125, turnover 14,625.
+        rates = dict(OPTION_BROKERAGE_PER_ORDER_RS=20.0, OPTION_STT_SELL_PCT=0.15, OPTION_EXCHANGE_TXN_PCT=0.03503,
+                     OPTION_SEBI_PER_CRORE_RS=10.0, OPTION_STAMP_BUY_PCT=0.003, OPTION_GST_PCT=18.0)
+        brokerage, stt = 40.0, 8125 * 0.0015
+        exchange, sebi, stamp = 14625 * 0.0003503, 14625 * 10 / 1e7, 6500 * 0.00003
+        gst = (brokerage + exchange + sebi) * 0.18
+        expected = brokerage + stt + exchange + sebi + stamp + gst  # ~65.6
+        for m in self.each_module():
+            with mock.patch.multiple(m, **rates):
+                c = m.option_round_trip_charges(100.0, 125.0, 65)
+            self.assertEqual(c["brokerage"], 40.0)
+            self.assertAlmostEqual(c["stt"], stt, places=2)
+            self.assertAlmostEqual(c["total"], expected, delta=0.03)
+            self.assertAlmostEqual(c["total"], sum(v for k, v in c.items() if k != "total"), places=6)
+
+    def test_no_charges_without_a_trade(self):
+        for m in self.each_module():
+            self.assertEqual(m.option_round_trip_charges(0, 0, 65)["total"], 0.0)
+
+
 class SymbolHelperTests(StrategyTestCase):
     def test_extract_option_strike(self):
         for m in self.each_module():
