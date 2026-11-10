@@ -6,6 +6,7 @@ Two jobs run automatically on the server through `cron`:
 |---|---|---|---|
 | **Paper-trading auto-start** | `scripts/scheduled_paper_start.py` | Every 5 min, 09:00–12:25 | Starts v28 and v30 in `PAPERTRADE_LIVE` once a day, as soon as the Kite token is fresh |
 | **Daily history download** | `scripts/daily_download.py` | 16:00, retry at 21:00 | Downloads that day's 1-minute NIFTY option candles for backtesting |
+| **Paper vs backtest check** | `scripts/paper_vs_backtest.py` | 16:30, retry at 21:30 | Backtests the day on the downloaded data and compares it with the day's paper trades |
 
 Both skip weekends and the NSE holidays listed in `scripts/market_holidays.txt`.
 **LIVE_ORDER is never started automatically.** The auto-start can only start paper trading.
@@ -41,6 +42,10 @@ Paste these lines at the end. Each command must stay on **one line**:
 # Paper trading auto-start: every 5 min from 09:00 to 12:25 IST (03:30-06:55 UTC), Mon-Fri; starts once after the Kite login
 30-55/5 3 * * 1-5 cd /root/ai_algo_ui && mkdir -p logs && flock -n -o /tmp/paper_autostart.lock venv/bin/python scripts/scheduled_paper_start.py v28 v30 >> logs/scheduled_paper_start.log 2>&1
 */5 4-6 * * 1-5 cd /root/ai_algo_ui && mkdir -p logs && flock -n -o /tmp/paper_autostart.lock venv/bin/python scripts/scheduled_paper_start.py v28 v30 >> logs/scheduled_paper_start.log 2>&1
+
+# Paper vs backtest check at 16:30 and 21:30 IST (11:00 and 16:00 UTC), Mon-Fri, after the download
+0 11 * * 1-5 cd /root/ai_algo_ui && mkdir -p logs && flock -n /tmp/parity.lock venv/bin/python scripts/paper_vs_backtest.py >> logs/paper_vs_backtest.log 2>&1
+0 16 * * 1-5 cd /root/ai_algo_ui && mkdir -p logs && flock -n /tmp/parity.lock venv/bin/python scripts/paper_vs_backtest.py >> logs/paper_vs_backtest.log 2>&1
 ```
 
 In nano: paste with a right-click or Shift+Insert, then press **Ctrl+O**, **Enter**, **Ctrl+X**.
@@ -157,6 +162,38 @@ The dashboard's **Downloaded NIFTY Option CSV Files** section lists the files by
 Exit codes: `0` ok or nothing to do · `1` a download failed · `2` Kite login or token problem.
 
 ---
+
+## 4b. Paper vs backtest check
+
+After the day's option candles are downloaded, `scripts/paper_vs_backtest.py` backtests that day
+(in an isolated temporary copy, so your log folder is not touched) and compares the result with
+the day's paper trades for v28 and v30. Paper trades are read from `STRATEGY_LOG_DIR`
+(`papertrade_<ddmmyyyy>_*_<variant>.xlsx`, all sessions of the day merged).
+
+Trades are paired by side and entry time (within 3 minutes). For each pair it checks the contract,
+exit reason, entry/exit prices (after removing the backtest's slippage, since paper fills at the
+signal price; tolerance 1.5 points) and exit time (tolerance 3 minutes).
+
+| Verdict | Meaning |
+|---|---|
+| **MATCH** | Paper and backtest took the same trades with the same results; the backtest reflects live behaviour |
+| **DIFFERENT** | Something differs; each difference is listed. Investigate before trusting backtests for live decisions |
+| NO_PAPER_TRADES | The backtest traded but no paper trades were found (paper did not run, or did not trade) |
+| NO_TRADES | Neither traded |
+
+A **"SETTINGS DIFFER"** line means the paper session ran with different settings (MTF, MFE exit,
+max trades, SL) than the backtest uses today, so the differences may come from the settings.
+A note about **restarts** means paper ran several sessions that day; each restart starts a fresh
+trade count, which the backtest does not do.
+
+Reports: `logs/parity/parity_<date>.txt` (readable) and `.json`. Log: `logs/paper_vs_backtest.log`.
+
+```bash
+venv/bin/python scripts/paper_vs_backtest.py --date 2026-11-11            # a specific day
+venv/bin/python scripts/paper_vs_backtest.py --date 2026-11-11 --variant v28
+```
+
+Exit codes: `0` MATCH or nothing to compare · `1` DIFFERENT or ERROR · `2` the day's option files are not downloaded yet.
 
 ## 5. Weekly: use the new data for backtesting (on your PC)
 
