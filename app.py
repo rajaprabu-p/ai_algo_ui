@@ -1870,6 +1870,203 @@ def api_today():
                     "strategies": strategies, "download": download, "parity": parity})
 
 
+# ---------------------------------------------------------------------------
+# Performance page: equity curve, drawdown, daily P&L and breakdowns built from
+# the backtest / paper-trade Excel files in the strategy log folder.
+# ---------------------------------------------------------------------------
+_PERF_PATTERNS = (
+    ("backtest", re.compile(r"^backtest_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_(?P<settings>mtf.+?)_(?P<variant>v\d+)_(?P<ds>csv|kite)\.xlsx$")),
+    ("backtest", re.compile(r"^backtest_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_(?P<variant>v\d+)_(?P<settings>.+)\.xlsx$")),
+    ("paper", re.compile(r"^papertrade_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_\d{6}_(?P<settings>.+?)_(?P<variant>v\d+)\.xlsx$")),
+    ("paper", re.compile(r"^papertrade_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_\d{6}_(?P<variant>v\d+)\.xlsx$")),
+)
+_PERF_CACHE: dict = {}
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def classify_result_file(name: str):
+    """Identify a strategy result file: source, trade date, variant and settings group."""
+    for source, pattern in _PERF_PATTERNS:
+        m = pattern.match(name)
+        if not m:
+            continue
+        try:
+            day = datetime(int(m["y"]), int(m["m"]), int(m["d"])).date().isoformat()
+        except ValueError:
+            return None
+        settings = m.groupdict().get("settings") or "(no settings in name)"
+        if m.groupdict().get("ds"):
+            settings = f"{settings} ({m['ds']})"
+        return {"source": source, "date": day, "variant": m["variant"], "settings": settings}
+    return None
+
+
+def _read_result_file(path: str, source: str) -> dict:
+    """Trades + day context from one Excel file (cached by modification time)."""
+    mtime = os.path.getmtime(path)
+    cached = _PERF_CACHE.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    import pandas as pd
+
+    sheet = "trades" if source == "backtest" else "live_trade_events"
+    out = {"trades": [], "gap_type": "", "cpr_type": ""}
+    try:
+        frame = pd.read_excel(path, sheet_name=sheet)
+        for _, r in frame.iterrows():
+            if pd.isna(r.get("pnl_rs")):
+                continue
+            net = r.get("net_pnl_rs")
+            out["trades"].append({
+                "entry_time": str(r.get("entry_time", "")), "side": str(r.get("side", "")),
+                "symbol": str(r.get("option_symbol", "")), "exit_reason": str(r.get("exit_reason", "")),
+                "pnl_rs": float(r.get("pnl_rs")), "pnl_points": float(r.get("pnl_points", 0) or 0),
+                "net_pnl_rs": None if net is None or pd.isna(net) else float(net),
+            })
+        summary = pd.read_excel(path, sheet_name="summary")
+        metrics = dict(zip(summary["metric"].astype(str), summary["value"]))
+        out["gap_type"] = "" if pd.isna(metrics.get("gap_type")) else str(metrics.get("gap_type") or "")
+        out["cpr_type"] = "" if pd.isna(metrics.get("cpr_type")) else str(metrics.get("cpr_type") or "")
+    except Exception:
+        pass
+    _PERF_CACHE[path] = (mtime, out)
+    return out
+
+
+def compute_performance(days: list) -> dict:
+    """KPIs, equity curve, drawdown and breakdowns from per-day trade lists (pure function).
+
+    `days`: [{"date", "trades": [...], "gap_type", "cpr_type"}]. Uses net P&L (after
+    charges) only when every trade has it; otherwise everything is gross, so the
+    numbers are never a mix of the two.
+    """
+    days = sorted(days, key=lambda d: d["date"])
+    all_trades = [t for d in days for t in d["trades"]]
+    basis = "net" if all_trades and all(t.get("net_pnl_rs") is not None for t in all_trades) else "gross"
+    key = "net_pnl_rs" if basis == "net" else "pnl_rs"
+
+    daily, equity, peak, max_dd = [], 0.0, 0.0, 0.0
+    for d in days:
+        pnl = round(sum(t[key] for t in d["trades"]), 2)
+        equity = round(equity + pnl, 2)
+        peak = max(peak, equity)
+        drawdown = round(equity - peak, 2)
+        max_dd = min(max_dd, drawdown)
+        weekday = _WEEKDAYS[datetime.fromisoformat(d["date"]).weekday()]
+        daily.append({"date": d["date"], "weekday": weekday, "pnl": pnl, "equity": equity, "drawdown": drawdown,
+                      "trades": len(d["trades"]), "gap_type": d.get("gap_type") or "", "cpr_type": d.get("cpr_type") or ""})
+
+    pnls = [t[key] for t in all_trades]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    gross_loss = -sum(losses)
+    kpis = {
+        "basis": basis, "trading_days": len(daily), "trades": len(pnls),
+        "net_pnl": round(sum(pnls), 2),
+        "win_rate": round(100.0 * len(wins) / len(pnls), 1) if pnls else 0.0,
+        "profit_factor": round(sum(wins) / gross_loss, 2) if gross_loss > 0 else None,
+        "avg_per_trade": round(sum(pnls) / len(pnls), 2) if pnls else 0.0,
+        "avg_win": round(sum(wins) / len(wins), 2) if wins else 0.0,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0.0,
+        "max_drawdown": round(max_dd, 2),
+        "best_day": max((d["pnl"] for d in daily), default=0.0),
+        "worst_day": min((d["pnl"] for d in daily), default=0.0),
+        "losing_days": sum(1 for d in daily if d["pnl"] < 0),
+        "charges": round(sum(t["pnl_rs"] - t["net_pnl_rs"] for t in all_trades), 2) if basis == "net" else None,
+    }
+
+    def group(rows, field, value_key):
+        out = {}
+        for row in rows:
+            label = row.get(field) or "(unknown)"
+            g = out.setdefault(label, {"label": label, "count": 0, "total": 0.0, "wins": 0})
+            g["count"] += 1
+            g["total"] += row[value_key]
+            g["wins"] += 1 if row[value_key] > 0 else 0
+        result = []
+        for g in out.values():
+            result.append({"label": g["label"], "count": g["count"], "total": round(g["total"], 2),
+                           "avg": round(g["total"] / g["count"], 2), "win_rate": round(100.0 * g["wins"] / g["count"], 1)})
+        return result
+
+    order = {d: i for i, d in enumerate(_WEEKDAYS)}
+    trade_rows = [{"exit_reason": t["exit_reason"], "pnl": t[key]} for t in all_trades]
+    breakdowns = {
+        "weekday": sorted(group(daily, "weekday", "pnl"), key=lambda g: order.get(g["label"], 9)),
+        "exit_reason": sorted(group(trade_rows, "exit_reason", "pnl"), key=lambda g: -g["count"]),
+        "gap_type": sorted(group(daily, "gap_type", "pnl"), key=lambda g: -g["count"]),
+        "cpr_type": sorted(group(daily, "cpr_type", "pnl"), key=lambda g: -g["count"]),
+    }
+    return {"kpis": kpis, "daily": daily, "breakdowns": breakdowns}
+
+
+def collect_performance_days(log_dir: str, source: str, variant: str, settings: str,
+                             date_from: str = "", date_to: str = "") -> list:
+    """Per-day trades for one source/variant/settings group (paper sessions of a day merged)."""
+    by_day: dict = {}
+    for name in sorted(os.listdir(log_dir)):
+        info = classify_result_file(name)
+        if not info or info["source"] != source or info["variant"] != variant or info["settings"] != settings:
+            continue
+        if (date_from and info["date"] < date_from) or (date_to and info["date"] > date_to):
+            continue
+        parsed = _read_result_file(os.path.join(log_dir, name), source)
+        day = by_day.setdefault(info["date"], {"date": info["date"], "trades": [], "gap_type": "", "cpr_type": "", "_seen": set()})
+        for t in parsed["trades"]:
+            ident = (t["side"], t["symbol"], t["entry_time"])
+            if ident in day["_seen"]:
+                continue
+            day["_seen"].add(ident)
+            day["trades"].append(t)
+        day["gap_type"] = day["gap_type"] or parsed["gap_type"]
+        day["cpr_type"] = day["cpr_type"] or parsed["cpr_type"]
+    for day in by_day.values():
+        day.pop("_seen", None)
+    return list(by_day.values())
+
+
+@app.route("/performance")
+def performance_page():
+    return render_template("performance.html")
+
+
+@app.route("/api/performance")
+def api_performance():
+    log_dir = LOGS_DIR
+    if not os.path.isdir(log_dir):
+        return jsonify({"ok": True, "groups": [], "selected": None, "result": None})
+    groups: dict = {}
+    for name in os.listdir(log_dir):
+        info = classify_result_file(name)
+        if not info:
+            continue
+        k = (info["source"], info["variant"], info["settings"])
+        g = groups.setdefault(k, {"source": k[0], "variant": k[1], "settings": k[2], "dates": set()})
+        g["dates"].add(info["date"])
+    group_list = sorted(
+        ({"source": g["source"], "variant": g["variant"], "settings": g["settings"], "days": len(g["dates"]),
+          "first": min(g["dates"]), "last": max(g["dates"])} for g in groups.values()),
+        key=lambda g: (g["source"], g["variant"], g["last"], g["days"]), reverse=True)
+
+    source = request.args.get("source", "backtest")
+    variant = request.args.get("variant", "v28")
+    settings = request.args.get("settings", "")
+    date_from = request.args.get("from", "") if DATE_RE.fullmatch(request.args.get("from", "") or "") else ""
+    date_to = request.args.get("to", "") if DATE_RE.fullmatch(request.args.get("to", "") or "") else ""
+    candidates = [g for g in group_list if g["source"] == source and g["variant"] == variant]
+    if not any(g["settings"] == settings for g in candidates):
+        # Default: downloaded-CSV backtests first (the usual runs), then the group with the
+        # most days, then the most recent.
+        candidates.sort(key=lambda g: (g["settings"].endswith("(csv)"), g["days"], g["last"]), reverse=True)
+        settings = candidates[0]["settings"] if candidates else ""
+    result = None
+    if settings:
+        result = compute_performance(collect_performance_days(log_dir, source, variant, settings, date_from, date_to))
+    return jsonify({"ok": True, "groups": group_list,
+                    "selected": {"source": source, "variant": variant, "settings": settings, "from": date_from, "to": date_to},
+                    "result": result})
+
+
 @app.route('/api/log-files')
 def api_log_files():
     if not session.get("logged_in"):
