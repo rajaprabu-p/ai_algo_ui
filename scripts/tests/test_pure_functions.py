@@ -226,6 +226,22 @@ class GapAndContextTests(StrategyTestCase):
             self.assertEqual(ctx["cpr_type"], "NARROW")
             self.assertEqual(m.build_market_context(None)["gap_type"], "")
 
+    def test_market_context_prefers_true_day_open(self):
+        # The merged table starts at 09:19; the backtest stores the true 09:15 open in attrs.
+        day = pd.DataFrame({
+            "spot_open": [22620.95], "spot_high": [22718.0], "spot_low": [22546.0], "spot_close": [22603.0],
+        })
+        day.attrs.update(nifty_day_open=22690.45, nifty_day_high=22760.0, nifty_day_low=22540.0)
+        for m in self.each_module():
+            ctx = m.build_market_context(day, prev_high=22800.0, prev_low=22600.0, prev_close=22776.0)
+            self.assertEqual(ctx["nifty_open"], 22690)
+            self.assertEqual((ctx["nifty_high"], ctx["nifty_low"]), (22760, 22540))
+            self.assertAlmostEqual(ctx["gap_pct"], (22690 - 22776) / 22776 * 100)  # -0.38%, not -0.68%
+            self.assertLess(abs(ctx["gap_pct"]), m.GAP_DELAY_THRESHOLD_PCT)  # so no 09:31 delay
+            day_without = day.copy()
+            day_without.attrs = {}
+            self.assertEqual(m.build_market_context(day_without, prev_close=22776.0)["nifty_open"], 22621)
+
 
 class SymbolHelperTests(StrategyTestCase):
     def test_extract_option_strike(self):

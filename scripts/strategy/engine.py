@@ -1359,6 +1359,15 @@ def build_market_context(day: Optional[pd.DataFrame] = None, prev_high: float = 
             ctx["nifty_low"] = int(round(float(day["spot_low"].min())))
         if "spot_close" in day.columns:
             ctx["nifty_close"] = int(round(float(day.iloc[-1]["spot_close"])))
+        # prepare_merged_day drops the rows before the first 5-minute bar (09:15-09:18),
+        # so the merged table's first row is the 09:19 candle. The backtest stores the
+        # true day open/high/low from the raw spot candles; prefer them so the gap (and
+        # the gap-delay rule) matches live mode, which uses Kite's real day open.
+        attrs = getattr(day, "attrs", {}) or {}
+        for key in ("open", "high", "low"):
+            value = safe_float(attrs.get(f"nifty_day_{key}"), 0.0)
+            if value > 0:
+                ctx[f"nifty_{key}"] = int(round(value))
 
     if prev_close > 0:
         ctx["nifty_prev_close"] = int(round(prev_close))
@@ -7750,6 +7759,12 @@ def main() -> None:
             day.attrs["nifty_prev_close"] = safe_float(prev_ohlc.get("close"), 0.0)
             day.attrs["nifty_prev_high"] = safe_float(prev_ohlc.get("high"), 0.0)
             day.attrs["nifty_prev_low"] = safe_float(prev_ohlc.get("low"), 0.0)
+            # True day open/high/low from the raw 1-minute spot candles (the merged
+            # table starts at 09:19); used for the gap, the gap-delay rule and reports.
+            if spot is not None and not spot.empty:
+                day.attrs["nifty_day_open"] = today_open
+                day.attrs["nifty_day_high"] = safe_float(spot["high"].max(), 0.0)
+                day.attrs["nifty_day_low"] = safe_float(spot["low"].min(), 0.0)
 
             trades = run_single_day_test(day, RUN_MODE, ce_symbol_override=CE_SYMBOL, pe_symbol_override=PE_SYMBOL)
             export_outputs(trades, day, CE_SYMBOL, PE_SYMBOL, RUN_MODE)
