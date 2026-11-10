@@ -156,7 +156,10 @@ app.config.update(
 )
 
 # Routes reachable without logging in. Everything else requires a session.
-PUBLIC_ENDPOINTS = {"login_page", "static"}
+# "index" is public only so that "/" can show the public home page (templates/home.html)
+# to visitors who are not signed in; index() itself serves the dashboard only with a
+# logged-in session. "robots_txt" lets URL classifiers (e.g. Zscaler) read that page.
+PUBLIC_ENDPOINTS = {"login_page", "static", "index", "robots_txt"}
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 
 LOGIN_MAX_FAILURES = 5
@@ -672,14 +675,23 @@ def stop_named_strategy(name: str) -> tuple[bool, str]:
 
 @app.route("/")
 def index():
+    # Public endpoint (see PUBLIC_ENDPOINTS): visitors who are not signed in get the
+    # public home page only. Keep this check first; the dashboard below needs a session.
     if not session.get("logged_in"):
-        return redirect(url_for("login_page"))
+        return render_template("home.html")
     return render_template(
         "index.html",
         client_ip=local_server_ip(),
         server_time=ist_now_str(),
         server_time_epoch=time.time(),
     )
+
+
+@app.route("/robots.txt")
+def robots_txt():
+    """Let crawlers/URL classifiers read the public home page; keep them out of the rest."""
+    body = "User-agent: *\nAllow: /$\nDisallow: /\n"
+    return Response(body, mimetype="text/plain")
 
 
 @app.route("/api/editable-config", methods=["GET", "POST"])
