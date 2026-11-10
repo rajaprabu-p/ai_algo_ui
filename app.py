@@ -1879,6 +1879,9 @@ _PERF_PATTERNS = (
     ("backtest", re.compile(r"^backtest_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_(?P<variant>v\d+)_(?P<settings>.+)\.xlsx$")),
     ("paper", re.compile(r"^papertrade_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_\d{6}_(?P<settings>.+?)_(?P<variant>v\d+)\.xlsx$")),
     ("paper", re.compile(r"^papertrade_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_\d{6}_(?P<variant>v\d+)\.xlsx$")),
+    # LIVE_ORDER sessions use the same Excel writer as paper trading (sheet live_trade_events).
+    ("live", re.compile(r"^livetrade_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_\d{6}_(?P<settings>.+?)_(?P<variant>v\d+)\.xlsx$")),
+    ("live", re.compile(r"^livetrade_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_\d{6}_(?P<variant>v\d+)\.xlsx$")),
 )
 _PERF_CACHE: dict = {}
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -2049,6 +2052,8 @@ def api_performance():
         key=lambda g: (g["source"], g["variant"], g["last"], g["days"]), reverse=True)
 
     source = request.args.get("source", "backtest")
+    if source not in {"backtest", "paper", "live"}:
+        source = "backtest"
     variant = request.args.get("variant", "v28")
     settings = request.args.get("settings", "")
     date_from = request.args.get("from", "") if DATE_RE.fullmatch(request.args.get("from", "") or "") else ""

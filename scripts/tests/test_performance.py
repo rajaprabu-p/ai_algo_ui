@@ -27,6 +27,9 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(c("backtest_01092026_v30_main_mtf1min_strict1_sl50.xlsx")["variant"], "v30")
         self.assertEqual(c("papertrade_21102026_102400_mtf5min_max2_sl25_v28.xlsx"),
                          {"source": "paper", "date": "2026-10-21", "variant": "v28", "settings": "mtf5min_max2_sl25"})
+        self.assertEqual(c("livetrade_11112026_090012_mtf5min_mfe_max2_sl25_v28.xlsx"),
+                         {"source": "live", "date": "2026-11-11", "variant": "v28", "settings": "mtf5min_mfe_max2_sl25"})
+        self.assertEqual(c("livetrade_11112026_090012_v30.xlsx")["source"], "live")
         self.assertIsNone(c("papertrade_09112026_112809_v30.txt"))
         self.assertIsNone(c("strategy_v28.log"))
         self.assertIsNone(c("backtest_31022026_v28_x.xlsx"))  # invalid date
@@ -64,6 +67,36 @@ class ComputeTests(unittest.TestCase):
     def test_empty(self):
         r = webapp.compute_performance([])
         self.assertEqual((r["kpis"]["trades"], r["daily"]), (0, []))
+
+
+class LiveFilesTests(unittest.TestCase):
+    def test_live_sessions_merged_per_day(self):
+        import shutil
+        import tempfile
+
+        import pandas as pd
+
+        tmp = tempfile.mkdtemp(prefix="perf_live_")
+        try:
+            def write(name, rows):
+                with pd.ExcelWriter(Path(tmp) / name) as xw:
+                    pd.DataFrame([{"metric": "gap_type", "value": "GAP_UP"}, {"metric": "cpr_type", "value": "WIDE"}]).to_excel(
+                        xw, sheet_name="summary", index=False)
+                    pd.DataFrame(rows).to_excel(xw, sheet_name="live_trade_events", index=False)
+            a = {"entry_time": "2026-11-11 09:25:00", "side": "CE", "option_symbol": "NIFTY26N1724900CE",
+                 "exit_reason": "TRAILING_STOP_HIT", "pnl_rs": 1950.0, "pnl_points": 30.0}
+            b = {"entry_time": "2026-11-11 10:40:00", "side": "PE", "option_symbol": "NIFTY26N1724900PE",
+                 "exit_reason": "EMERGENCY_SL_HIT", "pnl_rs": -1625.0, "pnl_points": -25.0}
+            write("livetrade_11112026_090012_mtf5min_mfe_max2_sl25_v28.xlsx", [a])
+            write("livetrade_11112026_101500_mtf5min_mfe_max2_sl25_v28.xlsx", [a, b])  # restart repeats trade a
+            write("papertrade_11112026_090012_mtf5min_mfe_max2_sl25_v28.xlsx", [b])    # paper: not live
+            days = webapp.collect_performance_days(tmp, "live", "v28", "mtf5min_mfe_max2_sl25")
+            r = webapp.compute_performance(days)
+            self.assertEqual((r["kpis"]["trades"], r["kpis"]["net_pnl"], r["kpis"]["basis"]), (2, 325.0, "gross"))
+            self.assertEqual(r["daily"][0]["gap_type"], "GAP_UP")
+        finally:
+            webapp._PERF_CACHE.clear()
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class RouteTests(unittest.TestCase):
