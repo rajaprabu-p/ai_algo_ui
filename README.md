@@ -61,6 +61,12 @@ python app.py
 
 4. Open the UI in browser at `http://<ec2-public-ip>:5000`.
 
+## Automation (paper-trading auto-start and daily history download)
+
+Paper trading can start automatically each trading morning, and the day's option candles can be
+downloaded automatically after market close, both via cron on the server. See
+[AUTOMATION.md](AUTOMATION.md) for setup, daily routine and troubleshooting.
+
 ## Deploying code updates (FileZilla)
 
 Strategy logic lives in `scripts/strategy/` (`engine.py` plus per-variant settings in
