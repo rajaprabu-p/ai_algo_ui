@@ -153,6 +153,10 @@ app.config.update(
     # Browsers do not send a Lax cookie on cross-site form posts or fetches, so
     # another website cannot trigger dashboard actions in a logged-in browser.
     SESSION_COOKIE_SAMESITE="Lax",
+    # Send the login cookie only over HTTPS (the site is served by nginx with TLS).
+    # For local testing over plain http://<LAN-IP>:5000, set SESSION_COOKIE_SECURE=false in .env.
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "true").strip().lower()
+    not in {"0", "false", "no", "off"},
 )
 
 # Routes reachable without logging in. Everything else requires a session.
