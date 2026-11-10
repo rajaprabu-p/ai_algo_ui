@@ -11,6 +11,7 @@ import time
 import re
 import socket
 import hmac
+import json
 import threading
 from datetime import datetime, timedelta, timezone
 from werkzeug.security import check_password_hash
@@ -1716,6 +1717,157 @@ def api_daily_download_status():
         "last_ok": {k: summary["last_ok"][k] for k in ("trade_date", "finished_at")} if summary["last_ok"] else None,
         "files": files, "error_files": error_files, "tail": tail_lines,
     })
+
+
+# ---------------------------------------------------------------------------
+# "Today" panel: one summary of everything checked each morning / evening.
+# ---------------------------------------------------------------------------
+PAPER_AUTOSTART_LOG = os.path.join(WORKDIR, "logs", "scheduled_paper_start.log")
+PARITY_DIR = os.path.join(WORKDIR, "logs", "parity")
+TODAY_STRATEGIES = ("v28", "v30")
+_OPEN_PNL_RE = re.compile(
+    r"^\[OPEN PNL\] (?P<at>\S+ \S+) \S+ \| entry_time=(?P<entry_time>.*?) \| trade_count=(?P<count>\d+) \| "
+    r"symbol=(?P<symbol>\S+) \| side=(?P<side>\S+) \| ltp=(?P<ltp>[-\d.]+) \| entry=(?P<entry>[-\d.]+) \| "
+    r"qty=(?P<qty>\d+) \| unrealized=(?P<upts>[-\d.]+) pts \((?P<urs>[-\d.]+) rs\) \| "
+    r"realized=(?P<realized>[-\d.]+) rs \| total_mtm=(?P<total>[-\d.]+) rs"
+)
+_ENTERED_RE = re.compile(
+    r"^Entered position at (?P<at>\S+ \S+) \|.*?side=(?P<side>\S+) symbol=(?P<symbol>\S+) "
+    r"reason=(?P<reason>\S+) entry=(?P<entry>[-\d.]+)"
+)
+_EXITED_RE = re.compile(
+    r"^Exited position at (?P<at>\S+ \S+) \|.*? with reason (?P<reason>\S+)\. symbol=(?P<symbol>\S+) "
+    r"side=(?P<side>\S+) entry=(?P<entry>[-\d.]+) exit=(?P<exit>[-\d.]+) \| P&L: (?P<pnl_rs>[-\d.]+) Rs "
+    r"\((?P<pnl_pts>[-\d.]+) points\)\. Cumulative MTM: (?P<mtm>[-\d.]+) Rs"
+)
+_STOPPED_RE = re.compile(r"Trading stopped by: (?P<reason>.+)$")
+
+
+def _read_tail(path: str, max_bytes: int = 512 * 1024) -> str:
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            handle.seek(max(0, size - max_bytes))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def parse_strategy_log_today(text: str, today: str) -> dict:
+    """Today's trades, open position and P&L from a strategy log (lines dated `today` only)."""
+    trades, last_entered, last_open, stopped = [], None, None, ""
+    realized = 0.0
+    order = 0
+    last_entered_at = last_exit_at = -1
+    for raw in text.splitlines():
+        line = raw.strip()
+        if today not in line:
+            continue
+        order += 1
+        if (m := _EXITED_RE.match(line)):
+            trades.append({"time": m["at"][11:16], "side": m["side"], "symbol": m["symbol"],
+                           "entry": float(m["entry"]), "exit": float(m["exit"]), "reason": m["reason"],
+                           "pnl_points": float(m["pnl_pts"]), "pnl_rs": float(m["pnl_rs"])})
+            realized = float(m["mtm"])
+            last_exit_at = order
+        elif (m := _ENTERED_RE.match(line)):
+            last_entered = {"time": m["at"][11:16], "side": m["side"], "symbol": m["symbol"],
+                            "entry": float(m["entry"]), "reason": m["reason"]}
+            last_entered_at = order
+        elif (m := _OPEN_PNL_RE.match(line)):
+            last_open = {"at": m["at"][11:19], "symbol": m["symbol"], "side": m["side"], "ltp": float(m["ltp"]),
+                         "entry": float(m["entry"]), "unrealized_points": float(m["upts"]),
+                         "unrealized_rs": float(m["urs"]), "realized_rs": float(m["realized"]),
+                         "total_rs": float(m["total"]), "order": order}
+        elif (m := _STOPPED_RE.search(line)):
+            stopped = m["reason"].strip()
+    position = None
+    if last_entered is not None and last_entered_at > last_exit_at:
+        position = dict(last_entered)
+        if last_open and last_open["order"] > last_entered_at and last_open["symbol"] == last_entered["symbol"]:
+            position.update({k: last_open[k] for k in ("ltp", "unrealized_points", "unrealized_rs", "at")})
+    unrealized = position.get("unrealized_rs", 0.0) if position else 0.0
+    return {"trades": trades, "trade_count": len(trades), "open_position": position,
+            "realized_rs": round(realized, 2), "unrealized_rs": round(unrealized, 2),
+            "total_rs": round(realized + unrealized, 2), "stopped_by": stopped}
+
+
+def parse_autostart_log_today(text: str, today: str, started_markers: dict) -> dict:
+    """Status of today's paper auto-start from logs/scheduled_paper_start.log."""
+    lines = [l.strip() for l in text.splitlines() if l.strip().startswith(f"[{today} ")]
+    if started_markers:
+        status, detail = "STARTED", ", ".join(f"{n} at {t}" for n, t in sorted(started_markers.items()))
+    elif not lines:
+        status, detail = "NOT_RUN", "no auto-start check has run today yet"
+    else:
+        last = lines[-1].split("] ", 1)[-1]
+        if "waiting for today's Kite token" in last:
+            status = "WAITING_TOKEN"
+        elif "market holiday" in last:
+            status = "HOLIDAY"
+        elif "weekend" in last:
+            status = "WEEKEND"
+        elif "outside the start window" in last:
+            status = "OUTSIDE_WINDOW"
+        elif "ERROR" in last:
+            status = "ERROR"
+        else:
+            status = "CHECKED"
+        detail = last
+    return {"status": status, "detail": detail, "last_check": lines[-1][1:20] if lines else "",
+            "started": started_markers}
+
+
+@app.route("/api/today")
+def api_today():
+    today = datetime.now(IST).date().isoformat()
+
+    strategies = {}
+    for name in TODAY_STRATEGIES:
+        pid, running = 0, False
+        try:
+            with open(pid_path_for(name), "r", encoding="utf-8") as f:
+                pid = int(f.read().strip() or 0)
+            running = bool(pid) and is_pid_running(pid)
+        except Exception:
+            pass
+        log_path = get_active_log_path(name)
+        summary = {"trades": [], "trade_count": 0, "open_position": None, "realized_rs": 0.0,
+                   "unrealized_rs": 0.0, "total_rs": 0.0, "stopped_by": ""}
+        try:
+            if os.path.exists(log_path) and datetime.fromtimestamp(os.path.getmtime(log_path), IST).date().isoformat() == today:
+                summary = parse_strategy_log_today(_read_tail(log_path), today)
+        except Exception:
+            pass
+        strategies[name] = {"running": running, "mode": read_mode(name) if running else "", **summary}
+
+    markers = {}
+    for name in TODAY_STRATEGIES:
+        marker = os.path.join(WORKDIR, "logs", f"autostart_{name}_{today}.done")
+        if os.path.exists(marker):
+            markers[name] = datetime.fromtimestamp(os.path.getmtime(marker), IST).strftime("%H:%M")
+    autostart = parse_autostart_log_today(_read_tail(PAPER_AUTOSTART_LOG, 64 * 1024), today, markers)
+
+    download = None
+    if os.path.isfile(DAILY_DOWNLOAD_LOG):
+        last = parse_daily_download_log(_read_tail(DAILY_DOWNLOAD_LOG, 256 * 1024))["last"]
+        if last:
+            download = {k: last[k] for k in ("trade_date", "status", "finished_at", "expiries")}
+
+    parity = None
+    try:
+        reports = sorted(n for n in os.listdir(PARITY_DIR) if re.fullmatch(r"parity_\d{4}-\d{2}-\d{2}\.json", n))
+        if reports:
+            with open(os.path.join(PARITY_DIR, reports[-1]), "r", encoding="utf-8") as f:
+                report = json.load(f)
+            parity = {"trade_date": report.get("trade_date"), "checked_at": report.get("checked_at"),
+                      "variants": {v: {"verdict": r.get("verdict"), "issues": (r.get("issues") or [])[:6]}
+                                   for v, r in (report.get("variants") or {}).items()}}
+    except Exception:
+        parity = None
+
+    return jsonify({"ok": True, "date": today, "token": kite_token_status(), "autostart": autostart,
+                    "strategies": strategies, "download": download, "parity": parity})
 
 
 @app.route('/api/log-files')

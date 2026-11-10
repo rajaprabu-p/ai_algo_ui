@@ -199,6 +199,15 @@
 
       .status-ok { color: #166534; font-weight: 600; }
       .status-fail { color: #b91c1c; font-weight: 600; }
+      .today-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.6rem; }
+      .today-card { border: 1px solid #d6e5de; border-radius: 10px; padding: 0.6rem 0.75rem; background: #fff; font-size: 0.9rem; }
+      .today-card h3 { margin: 0 0 0.35rem; font-size: 0.95rem; color: #0f3f71; }
+      .today-card .row { margin: 0.15rem 0; }
+      .today-card .row strong { color: #334155; }
+      .today-ok { color: #166534; font-weight: 600; }
+      .today-bad { color: #b91c1c; font-weight: 600; }
+      .today-warn { color: #92400e; font-weight: 600; }
+      .today-muted { color: #475569; }
       .status-running { color: #166534; font-weight: 700; }
       .status-stopped { color: #b91c1c; font-weight: 700; }
       .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1rem; }
@@ -335,6 +344,14 @@
         </span>
       </span>
     </div>
+
+    <details id="today-section" class="section" open>
+      <summary>Today</summary>
+      <div class="section-body">
+        <div id="today-grid" class="today-grid"><div class="today-muted">Loading...</div></div>
+        <div id="today-updated" class="today-muted" style="font-size:0.82rem;margin-top:0.4rem"></div>
+      </div>
+    </details>
 
     <details class="section" open>
       <summary>Kite Login</summary>
@@ -1122,6 +1139,128 @@
           return item;
         }));
         document.getElementById('weekly-options-files-info').textContent = 'Found ' + j.files.length + ' CSV file(s).';
+      }
+
+      function todayCard(title, rows){
+        const card = document.createElement('div');
+        card.className = 'today-card';
+        const h = document.createElement('h3');
+        h.textContent = title;
+        card.appendChild(h);
+        rows.forEach(([label, value, cls]) => {
+          const row = document.createElement('div');
+          row.className = 'row';
+          if(label){
+            const strong = document.createElement('strong');
+            strong.textContent = label + ': ';
+            row.appendChild(strong);
+          }
+          const span = document.createElement('span');
+          span.textContent = value;
+          if(cls) span.className = cls;
+          row.appendChild(span);
+          card.appendChild(row);
+        });
+        return card;
+      }
+
+      function todayRs(value){
+        const n = Number(value || 0);
+        return (n >= 0 ? '+' : '') + n.toFixed(0) + ' Rs';
+      }
+
+      const AUTOSTART_LABELS = {
+        STARTED: ['Started', 'today-ok'], WAITING_TOKEN: ['Waiting for Kite login', 'today-warn'],
+        HOLIDAY: ['Market holiday', 'today-muted'], WEEKEND: ['Weekend', 'today-muted'],
+        OUTSIDE_WINDOW: ['Outside start window', 'today-muted'], NOT_RUN: ['Not run yet today', 'today-muted'],
+        ERROR: ['Error', 'today-bad'], CHECKED: ['Checked', 'today-muted'],
+      };
+      const DOWNLOAD_LABELS = {
+        OK: ['OK', 'today-ok'], FAILED: ['FAILED', 'today-bad'], LOGIN_FAILED: ['Kite login failed', 'today-bad'],
+        RUNNING: ['Running', 'today-warn'], INCOMPLETE: ['Incomplete', 'today-warn'],
+        SKIPPED: ['Skipped', 'today-muted'], DRY_RUN: ['Dry run', 'today-muted'],
+      };
+      const PARITY_LABELS = {
+        MATCH: ['MATCH', 'today-ok'], DIFFERENT: ['DIFFERENT', 'today-bad'], ERROR: ['ERROR', 'today-bad'],
+        NO_PAPER_TRADES: ['No paper trades', 'today-warn'], NO_TRADES: ['No trades', 'today-muted'],
+      };
+
+      async function loadTodayPanel(){
+        const grid = document.getElementById('today-grid');
+        const updated = document.getElementById('today-updated');
+        let j;
+        try {
+          const r = await fetch('/api/today');
+          j = await r.json();
+          if(!r.ok || !j.ok) throw new Error(j.msg || ('HTTP ' + r.status));
+        } catch(error) {
+          updated.textContent = 'Unable to load today\'s summary: ' + error.message;
+          return;
+        }
+        const cards = [];
+        const tok = j.token || {};
+        cards.push(todayCard('Kite token', [
+          ['', tok.state === 'valid' ? 'Valid' : (tok.state === 'unknown' ? 'Unknown age' : 'Login needed'),
+           tok.state === 'valid' ? 'today-ok' : (tok.state === 'unknown' ? 'today-warn' : 'today-bad')],
+          ['', tok.message || '', 'today-muted'],
+        ]));
+
+        const a = j.autostart || {};
+        const [aLabel, aCls] = AUTOSTART_LABELS[a.status] || [a.status || '-', 'today-muted'];
+        const aRows = [['', aLabel, aCls]];
+        if(a.detail) aRows.push(['', a.detail, 'today-muted']);
+        if(a.last_check) aRows.push(['Last check', a.last_check.slice(11), 'today-muted']);
+        cards.push(todayCard('Paper auto-start', aRows));
+
+        Object.entries(j.strategies || {}).forEach(([name, s]) => {
+          const rows = [['', s.running ? ('Running' + (s.mode ? ' (' + s.mode + ')' : '')) : 'Not running',
+                         s.running ? 'today-ok' : 'today-muted']];
+          const p = s.open_position;
+          if(p){
+            let text = p.side + ' ' + p.symbol + ' @ ' + Number(p.entry).toFixed(2);
+            if(p.ltp !== undefined){
+              text += ' → ' + Number(p.ltp).toFixed(2) + ' (' + (p.unrealized_points >= 0 ? '+' : '') +
+                      Number(p.unrealized_points).toFixed(2) + ' pts, ' + todayRs(p.unrealized_rs) + ')';
+            }
+            rows.push(['Open', text, p.unrealized_rs < 0 ? 'today-bad' : 'today-ok']);
+          } else {
+            rows.push(['Open', 'no position', 'today-muted']);
+          }
+          rows.push(["Today's P&L", todayRs(s.total_rs) + ' (realized ' + todayRs(s.realized_rs) + ')',
+                     s.total_rs > 0 ? 'today-ok' : (s.total_rs < 0 ? 'today-bad' : 'today-muted')]);
+          rows.push(['Trades', String(s.trade_count || 0), 'today-muted']);
+          (s.trades || []).forEach(t => rows.push(['', t.time + ' ' + t.side + ' ' + Number(t.entry).toFixed(2) + ' → ' +
+            Number(t.exit).toFixed(2) + ' ' + todayRs(t.pnl_rs) + ' (' + t.reason + ')', t.pnl_rs >= 0 ? 'today-ok' : 'today-bad']));
+          if(s.stopped_by) rows.push(['Stopped by', s.stopped_by, 'today-muted']);
+          cards.push(todayCard(name, rows));
+        });
+
+        const d = j.download;
+        if(d){
+          const [dLabel, dCls] = DOWNLOAD_LABELS[d.status] || [d.status, 'today-muted'];
+          cards.push(todayCard('Daily download', [
+            ['', dLabel, dCls], ['Trade date', d.trade_date, 'today-muted'],
+            ['Last run', (d.finished_at || '') + ' IST', 'today-muted'],
+          ]));
+        } else {
+          cards.push(todayCard('Daily download', [['', 'No runs yet', 'today-muted']]));
+        }
+
+        const par = j.parity;
+        if(par){
+          const rows = [['Trade date', par.trade_date || '-', 'today-muted']];
+          Object.entries(par.variants || {}).forEach(([v, r]) => {
+            const [pLabel, pCls] = PARITY_LABELS[r.verdict] || [r.verdict, 'today-muted'];
+            rows.push([v, pLabel, pCls]);
+            (r.issues || []).slice(0, 3).forEach(issue => rows.push(['', issue, 'today-muted']));
+          });
+          cards.push(todayCard('Paper vs backtest', rows));
+        } else {
+          cards.push(todayCard('Paper vs backtest', [['', 'No report yet', 'today-muted']]));
+        }
+
+        grid.replaceChildren(...cards);
+        updated.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' (refreshes every 15 seconds)';
       }
 
       const DAILY_DOWNLOAD_BADGES = {
@@ -2614,6 +2753,8 @@
       });
 
       setInterval(refreshAuto, 3000);
+      loadTodayPanel();
+      setInterval(loadTodayPanel, 15000);
       updateServerTime();
       setInterval(updateServerTime, 1000);
     </script>
