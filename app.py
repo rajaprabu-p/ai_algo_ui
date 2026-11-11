@@ -2066,7 +2066,25 @@ def api_performance():
         result = compute_performance(collect_performance_days(log_dir, source, variant, settings, date_from, date_to))
     return jsonify({"ok": True, "groups": group_list,
                     "selected": {"source": source, "variant": variant, "settings": settings, "from": date_from, "to": date_to},
-                    "result": result})
+                    "result": result, "holidays": load_market_holidays()})
+
+
+MARKET_HOLIDAYS_FILE = os.path.join(WORKDIR, "scripts", "market_holidays.txt")
+
+
+def load_market_holidays(path: str = MARKET_HOLIDAYS_FILE) -> dict:
+    """{"YYYY-MM-DD": name} from scripts/market_holidays.txt (same file the cron jobs use)."""
+    holidays: dict = {}
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            for raw in fh:
+                text, _, comment = raw.partition("#")
+                text = text.strip()
+                if DATE_RE.fullmatch(text):
+                    holidays[text] = comment.strip() or "Market holiday"
+    except OSError:
+        pass
+    return holidays
 
 
 @app.route('/api/log-files')

@@ -142,6 +142,12 @@
     .cal-day.win .p { color: var(--good-text); }
     .cal-day.loss { background: color-mix(in srgb, var(--bad-text) 9%, transparent); }
     .cal-day.loss .p { color: var(--bad-text); }
+    .cal-day.holiday {
+      background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--text-primary) 4%, transparent) 0 6px, transparent 6px 12px);
+      border: 1px dashed var(--axis);
+    }
+    .cal-day .h { font-weight: 600; margin-top: 4px; color: var(--text-secondary); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .cal-day .hn { font-size: 11px; color: var(--text-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
     @media (max-width: 700px) {
       .cal-month { min-width: 112px; padding: 6px 8px; font-size: 12px; }
       .cal-head, .cal-grid { gap: 4px; }
@@ -150,6 +156,8 @@
       .cal-day .n { font-size: 13px; }
       .cal-day .p { font-size: 12px; }
       .cal-day .t { font-size: 10px; }
+      .cal-day .h { font-size: 10px; letter-spacing: 0; }
+      .cal-day .hn { display: none; }
     }
     .grid-bd .card > div { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
@@ -379,6 +387,7 @@
 
     // ---- Monthly calendar (Mon-Fri grid, one month at a time) ----
     let calMonth = null;   // 'YYYY-MM' being shown; kept across reloads
+    let holidays = {};     // {'YYYY-MM-DD': name} from scripts/market_holidays.txt
     const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     const fmtCompact = n => {
       const a = Math.abs(n), s = Math.round(n) === 0 ? '' : (n > 0 ? '+' : '−');
@@ -425,8 +434,10 @@
       bar.append(nav('Previous month', '◀', idx - 1), strip, nav('Next month', '▶', idx + 1));
 
       document.getElementById('cal-title').textContent = `Trades in ${MONTHS[mm - 1]} ${yy}`;
+      const monthHolidays = Object.keys(holidays).filter(h => h.startsWith(calMonth + '-') && ![0, 6].includes(new Date(h + 'T00:00').getDay())).length;
       const sum = el('div', {class: 'cal-sum'},
-        `${g.days} trading day(s) · ${g.trades} trade(s) · ${g.wins} winning day(s) · month total ${fmtRs(g.pnl)}`);
+        `${g.days} trading day(s) · ${g.trades} trade(s) · ${g.wins} winning day(s)` +
+        (monthHolidays ? ` · ${monthHolidays} market holiday${monthHolidays === 1 ? '' : 's'}` : '') + ` · month total ${fmtRs(g.pnl)}`);
 
       const head = el('div', {class: 'cal-head'});
       ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].forEach(w => head.appendChild(el('div', {}, w)));
@@ -441,9 +452,14 @@
         if(dow === 0 || dow === 6) continue;
         if(first){ for(let i = 1; i < dow; i++) grid.appendChild(el('div', {class: 'cal-day blank'})); first = false; }
         const iso = `${yy}-${pad(mm)}-${pad(day)}`;
-        const d = g.map[iso];
-        const cell = el('div', {class: 'cal-day' + (d ? (d.pnl > 0 ? ' win' : d.pnl < 0 ? ' loss' : '') : '') + (iso === todayIso ? ' today' : '')});
+        const d = g.map[iso], hol = holidays[iso];
+        const cell = el('div', {class: 'cal-day' + (d ? (d.pnl > 0 ? ' win' : d.pnl < 0 ? ' loss' : '') : hol ? ' holiday' : '') + (iso === todayIso ? ' today' : '')});
         cell.appendChild(el('div', {class: 'n'}, String(day)));
+        if(hol && !d){
+          cell.appendChild(el('div', {class: 'h'}, 'Holiday'));
+          cell.appendChild(el('div', {class: 'hn'}, hol));
+          cell.title = `${iso}: market holiday (${hol})`;
+        }
         if(d){
           cell.appendChild(el('div', {class: 'p'}, money(d.pnl)));
           cell.appendChild(el('div', {class: 't'}, `${d.trades} trade${d.trades === 1 ? '' : 's'}`));
@@ -523,6 +539,7 @@
         return;
       }
       groups = j.groups || [];
+      holidays = j.holidays || {};
       fillSettings(j.selected && j.selected.settings);
       render(j.result);
       content.classList.remove('loading');

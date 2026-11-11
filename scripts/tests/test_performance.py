@@ -113,6 +113,19 @@ class RouteTests(unittest.TestCase):
         self.assertTrue(j["ok"])
         self.assertEqual(j["selected"]["from"], "")  # invalid dates are ignored
         self.assertIn('href="/performance"', user.get("/").get_data(as_text=True))
+        self.assertEqual(j["holidays"].get("2026-11-10"), "Diwali-Balipratipada")
+
+
+class HolidayTests(unittest.TestCase):
+    def test_load_market_holidays(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "h.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("# header\n\n2026-11-10  # Diwali\n2026-12-25\nnot-a-date  # junk\n")
+            self.assertEqual(webapp.load_market_holidays(path),
+                             {"2026-11-10": "Diwali", "2026-12-25": "Market holiday"})
+            self.assertEqual(webapp.load_market_holidays(os.path.join(tmp, "missing.txt")), {})
 
 
 if __name__ == "__main__":
