@@ -253,7 +253,7 @@ TICK_STALL_RECONNECT_SECONDS = 150
 TICK_STALL_RECONNECT_COOLDOWN_SECONDS = 120
 IDLE_STATUS_INTERVAL_SECONDS = 30
 OPEN_PNL_LOG_INTERVAL_SECONDS = 30
-ENTRY_DIAGNOSTICS = True
+ENTRY_DIAGNOSTICS = False
 # Live modes rebuild the whole day on every completed minute, which re-ran the
 # per-candle [ENTRY PARITY]/[ENTRY BLOCK] prints for every past candle and
 # repeated the same lines in the log dozens of times. With dedupe on, each
@@ -6521,6 +6521,16 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
         day.loc[i, "realized_mtm_rs"] = realized_mtm_rs
 
         if not in_position:
+            # Backtest: flat after the entry cutoff -> nothing more can happen today,
+            # so stop here like PAPERTRADE_LIVE does (NO_NEW_ENTRY_AFTER_NO_OPEN_TRADE).
+            # An open trade still runs on until it exits. Trades are unchanged; this
+            # only skips the afternoon candles (and their strike-refresh log lines).
+            if run_mode == "BACKTEST" and ts >= no_new_entry_after_ts:
+                if not guard_stop_reason:
+                    guard_stop_reason = "NO_NEW_ENTRY_AFTER_NO_OPEN_TRADE"
+                day.loc[i, "guard_status"] = "NO_NEW_ENTRY_CUTOFF"
+                break
+
             # Always block fresh entries after the configured cutoff time,
             # regardless of whether MTM guard or MAX_TRADES mode is active.
             # print(f"Checking entry conditions at {ts}... (realized MTM={realized_mtm_rs:.2f} rs, trade_count={trade_count})")
