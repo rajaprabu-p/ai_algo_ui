@@ -159,6 +159,24 @@
         box-shadow: 0 4px 10px rgba(15, 118, 110, 0.25);
       }
 
+      .link-btn {
+        margin-left: auto;
+        display: inline-block;
+        padding: 0.55rem 0.9rem;
+        border-radius: 8px;
+        background: var(--btn-bg);
+        color: var(--btn-text);
+        font-weight: 600;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.12s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+      }
+      .link-btn:hover {
+        background: var(--btn-hover);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 10px rgba(15, 118, 110, 0.25);
+      }
+
       button:disabled {
         opacity: 0.5;
         cursor: not-allowed;
@@ -352,7 +370,7 @@
   <body>
     <div class="page-header">
       <h1 class="page-title"><span class="page-title-icon" aria-hidden="true"></span><span>RP Algo</span></h1>
-      <a href="/performance" style="margin-left:auto;font-weight:600">Performance &rarr;</a>
+      <a href="/performance" class="link-btn">Performance &rarr;</a>
     </div>
     <div class="site-keywords">
       <span>Categories: NIFTY Options | Backtest | Paper Trade | Live Order | Logs and PnL Analytics</span>
