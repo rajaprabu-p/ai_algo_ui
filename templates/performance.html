@@ -4,17 +4,28 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>RP Algo Performance</title>
+  <meta name="theme-color" content="#0f766e" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%230f766e'/%3E%3Cstop offset='100%25' stop-color='%231d4ed8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M14 44h36' stroke='%23dcfce7' stroke-width='3' stroke-linecap='round' opacity='.95'/%3E%3Cpath d='M18 39l8-6 7 2 8-10 11-4' fill='none' stroke='%23ffffff' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ctext x='32' y='34' text-anchor='middle' font-family='Arial, sans-serif' font-size='24' font-weight='700' fill='%23fbbf24'%3E%E2%82%B9%3C/text%3E%3C/svg%3E" />
   <style>
     :root {
       color-scheme: light;
-      --page: #f9f9f7;
-      --surface: #fcfcfb;
+      /* Same background, card and section-header look as the main dashboard (index.html). */
+      --page: #f3f8f8;
+      --page-bg:
+        radial-gradient(circle at 10% 10%, rgba(29, 78, 216, 0.10), transparent 35%),
+        radial-gradient(circle at 90% 20%, rgba(15, 118, 110, 0.12), transparent 40%),
+        linear-gradient(180deg, #f8fbff, #eef6f3);
+      --head-bg: linear-gradient(90deg, #0f766e 0%, #1d4ed8 100%);
+      --title: #0b3f6e;
+      --accent: #0f766e; --on-accent: #ffffff;
+      --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+      --surface: #ffffff;
       --text-primary: #0b0b0b;
       --text-secondary: #52514e;
       --text-muted: #898781;
       --grid: #e1e0d9;
       --axis: #c3c2b7;
-      --border: rgba(11, 11, 11, 0.10);
+      --border: #d8e6df;
       --gain: #2a78d6;      /* diverging pole: gains, equity */
       --loss: #e34948;      /* diverging pole: losses, drawdown */
       --good-text: #006300;
@@ -23,6 +34,11 @@
     @media (prefers-color-scheme: dark) {
       :root:where(:not([data-theme="light"])) {
         color-scheme: dark;
+        --page-bg:
+          radial-gradient(circle at 10% 10%, rgba(29, 78, 216, 0.16), transparent 35%),
+          radial-gradient(circle at 90% 20%, rgba(15, 118, 110, 0.18), transparent 40%),
+          linear-gradient(180deg, #0d1117, #0b1512);
+        --title: #9cc7f5; --accent: #2dd4bf; --on-accent: #042f2e; --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
         --page: #0d0d0d; --surface: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
         --text-muted: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
         --gain: #3987e5; --loss: #e66767; --good-text: #0ca30c; --bad-text: #ff8a80;
@@ -30,19 +46,37 @@
     }
     :root[data-theme="dark"] {
       color-scheme: dark;
+      --page-bg:
+        radial-gradient(circle at 10% 10%, rgba(29, 78, 216, 0.16), transparent 35%),
+        radial-gradient(circle at 90% 20%, rgba(15, 118, 110, 0.18), transparent 40%),
+        linear-gradient(180deg, #0d1117, #0b1512);
+      --title: #9cc7f5; --accent: #2dd4bf; --on-accent: #042f2e; --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
       --page: #0d0d0d; --surface: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
       --text-muted: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
       --gain: #3987e5; --loss: #e66767; --good-text: #0ca30c; --bad-text: #ff8a80;
     }
     * { box-sizing: border-box; }
     body {
-      margin: 0; padding: 16px; background: var(--page); color: var(--text-primary);
-      font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 14px;
+      margin: 0; padding: 16px; min-height: 100vh; color: var(--text-primary);
+      background-color: var(--page); background-image: var(--page-bg); background-attachment: fixed;
+      font-family: Arial, sans-serif; font-size: 14px;
     }
     a { color: var(--gain); }
-    header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-    h1 { margin: 0; font-size: 22px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    h1 { margin: 0; font-size: 22px; color: var(--title); display: flex; align-items: center; gap: 8px; letter-spacing: 0.3px; }
+    h1 .sub { font-weight: 400; color: var(--text-secondary); }
+    .logo { width: 26px; height: 26px; flex: 0 0 auto; border-radius: 7px; box-shadow: 0 2px 8px rgba(15, 118, 110, 0.22); }
+    .back {
+      text-decoration: none; padding: 6px 12px; border-radius: 8px; font-weight: 600;
+      background: var(--accent); color: var(--on-accent);
+    }
+    .back:hover { filter: brightness(0.92); }
     h2 { margin: 0 0 8px; font-size: 15px; color: var(--text-primary); }
+    /* Card titles become the dashboard's teal-to-blue section band. */
+    .card > h2 {
+      margin: -12px -12px 12px; padding: 9px 12px; border-radius: 9px 9px 0 0;
+      background: var(--head-bg); color: #fff; font-size: 15px;
+    }
     .filters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: end; margin-bottom: 12px; }
     .filters label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-secondary); }
     select, input, button {
@@ -51,16 +85,16 @@
     }
     select#settings { max-width: 360px; }
     button { cursor: pointer; }
-    button.active { border-color: var(--gain); font-weight: 600; }
+    button.active { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
     .basis { font-size: 12px; color: var(--text-secondary); margin: -4px 0 12px; }
     .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 12px; }
-    .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+    .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; box-shadow: var(--shadow); border-top: 3px solid var(--accent); }
     .tile .label { font-size: 12px; color: var(--text-secondary); }
     .tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
     .tile .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
     .good { color: var(--good-text); }
     .bad { color: var(--bad-text); }
-    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 12px; position: relative; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 12px; position: relative; box-shadow: var(--shadow); }
     .chart { width: 100%; height: 220px; position: relative; }
     .chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
     .tooltip {
@@ -129,8 +163,17 @@
 </head>
 <body>
   <header>
-    <h1>Performance</h1>
-    <a href="/">&larr; Back to dashboard</a>
+    <h1>
+      <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+        <defs><linearGradient id="logo-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0f766e"/><stop offset="100%" stop-color="#1d4ed8"/></linearGradient></defs>
+        <rect width="64" height="64" rx="16" fill="url(#logo-g)"/>
+        <path d="M14 44h36" stroke="#dcfce7" stroke-width="3" stroke-linecap="round" opacity=".95"/>
+        <path d="M18 39l8-6 7 2 8-10 11-4" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="32" y="34" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#fbbf24">₹</text>
+      </svg>
+      <span>RP Algo</span><span class="sub">· Performance</span>
+    </h1>
+    <a class="back" href="/">&larr; Back to dashboard</a>
   </header>
 
   <div class="filters" role="group" aria-label="Filters">
