@@ -2,7 +2,9 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>User Login</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RP Algo: Personal Algorithmic Trading Dashboard</title>
+    <meta name="description" content="RP Algo is a private dashboard for running and monitoring a personal algorithmic trading strategy for NIFTY index options: backtesting, paper trading and trade logs. Access is restricted to the owner." />
     <style>
       :root {
         --bg-a: #f6fbff;
@@ -38,7 +40,7 @@
 
       .card {
         width: 100%;
-        max-width: 430px;
+        max-width: 480px;
         background: var(--card-bg);
         border: 1px solid var(--card-border);
         border-radius: 14px;
@@ -113,6 +115,26 @@
         font-weight: 600;
       }
 
+      .about {
+        margin: 0 0 1rem;
+        color: var(--text);
+        font-size: 0.92rem;
+        line-height: 1.5;
+      }
+
+      .about p { margin: 0 0 0.45rem; }
+
+      .about ul { margin: 0.2rem 0 0; padding-left: 1.2rem; }
+
+      .private-note {
+        margin-top: 1rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--card-border);
+        color: var(--muted);
+        font-size: 0.84rem;
+        line-height: 1.45;
+      }
+
       .notice {
         margin-top: 0.8rem;
         padding: 0.6rem 0.75rem;
@@ -127,7 +149,19 @@
   <body>
     <div class="card">
       <div class="brand">RP Algo</div>
-      <h1>Login</h1>
+      <h1>Personal Algorithmic Trading Dashboard</h1>
+      <div class="about">
+        <p>
+          RP Algo is a private web dashboard used by its owner to run and monitor a personal,
+          rules-based trading strategy for NIFTY index options on the National Stock Exchange of India.
+          It is used to:
+        </p>
+        <ul>
+          <li>backtest the strategy on historical market data,</li>
+          <li>run paper trading (simulated trades with no real money),</li>
+          <li>review strategy logs, trade history and daily reports.</li>
+        </ul>
+      </div>
       <p class="subtitle">Sign in to access strategy controls and logs.</p>
       <form method="post" action="/login">
         <label>
@@ -146,6 +180,10 @@
       {% if error %}
       <div class="error">{{ error }}</div>
       {% endif %}
+      <p class="private-note">
+        This is a personal tool, not a public service. It does not offer investment advice, accept
+        clients or handle anyone else's money. Access to the dashboard is restricted to the owner.
+      </p>
     </div>
   </body>
 </html>
