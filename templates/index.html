@@ -213,7 +213,21 @@
         background: #f9fffc;
         color: #0f172a;
         font: 600 0.9rem Consolas, "Courier New", monospace;
+        border-left: 4px solid #94a3b8;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+        white-space: pre-line;
       }
+      .running-pnl-box[data-state="running"] { border-left-color: #0f766e; }
+      .running-pnl-box[data-state="up"] { border-left-color: #16a34a; background: #f0fdf4; }
+      .running-pnl-box[data-state="down"] { border-left-color: #dc2626; background: #fef2f2; }
+      .running-pnl-box[data-state="error"] { border-left-color: #b91c1c; background: #fff7ed; color: #9a3412; }
+      .running-pnl-box[data-state="stopped"] { color: #475569; }
+
+      /* Collapsible "Last log lines" under each runner (open/closed state remembered per panel). */
+      details.log-toggle { margin-top: 0.6rem; }
+      details.log-toggle > summary { cursor: pointer; user-select: none; }
+      details.log-toggle > pre { margin-top: 0.5rem; }
 
       .status-ok { color: #166534; font-weight: 600; }
       .status-fail { color: #b91c1c; font-weight: 600; }
@@ -428,7 +442,10 @@
             </label>
           </div>
           <p>Status: <span id="status-weekly-options-download">unknown</span></p>
-          <pre id="logs-weekly-options-download">(no logs)</pre>
+          <details class="log-toggle" data-key="weekly-options-download">
+            <summary>Last log lines</summary>
+            <pre id="logs-weekly-options-download">(no logs)</pre>
+          </details>
         </div>
       </div>
     </details>
@@ -467,8 +484,8 @@
           <div style="margin-top:0.3rem;color:#475569;font-size:0.85rem">
             Runs automatically Mon&ndash;Fri at 16:00 and 21:00 IST (cron on the server). Needs that day's Kite ACCESS_TOKEN.
           </div>
-          <details style="margin-top:0.6rem">
-            <summary style="cursor:pointer">Last log lines</summary>
+          <details class="log-toggle" data-key="daily-download">
+            <summary>Last log lines</summary>
             <pre id="daily-download-log">(no log)</pre>
           </details>
         </div>
@@ -653,8 +670,11 @@
             </span>
           </div>
           <p>Status: <span id="status-v28">unknown</span></p>
-          <input id="running-pnl-v28" class="running-pnl-box" type="text" readonly value="P&L: waiting for an active trade..." aria-label="v28 running PnL" />
-          <pre id="logs-v28">(no logs)</pre>
+          <div id="running-pnl-v28" class="running-pnl-box" role="status" aria-label="v28 running status" data-state="stopped">Checking status...</div>
+          <details class="log-toggle" data-key="v28">
+            <summary>Last log lines</summary>
+            <pre id="logs-v28">(no logs)</pre>
+          </details>
         </div>
       </div>
     </details>
@@ -685,8 +705,11 @@
             </span>
           </div>
           <p>Status: <span id="status-v30">unknown</span></p>
-          <input id="running-pnl-v30" class="running-pnl-box" type="text" readonly value="P&L: waiting for an active trade..." aria-label="v30 running PnL" />
-          <pre id="logs-v30">(no logs)</pre>
+          <div id="running-pnl-v30" class="running-pnl-box" role="status" aria-label="v30 running status" data-state="stopped">Checking status...</div>
+          <details class="log-toggle" data-key="v30">
+            <summary>Last log lines</summary>
+            <pre id="logs-v30">(no logs)</pre>
+          </details>
         </div>
       </div>
     </details>
@@ -712,8 +735,11 @@
             <span style="margin-left:0.8rem;color:#475569;font-size:0.9rem">Mode is fixed to LIVE_ORDER</span>
           </div>
           <p>Status: <span id="status-live-order-only">unknown</span></p>
-          <input id="running-pnl-live-order-only" class="running-pnl-box" type="text" readonly value="P&L: waiting for an active trade..." aria-label="Live order running PnL" />
-          <pre id="logs-live-order-only">(no logs)</pre>
+          <div id="running-pnl-live-order-only" class="running-pnl-box" role="status" aria-label="Live order running status" data-state="stopped">Checking status...</div>
+          <details class="log-toggle" data-key="live-order-only">
+            <summary>Last log lines</summary>
+            <pre id="logs-live-order-only">(no logs)</pre>
+          </details>
         </div>
       </div>
     </details>
@@ -837,6 +863,8 @@
         return expiry.getFullYear() + '-' + pad(expiry.getMonth() + 1) + '-' + pad(expiry.getDate());
       }
 
+      const MARKET_HOLIDAYS = {{ market_holidays|tojson }};   // {'YYYY-MM-DD': name}
+
       function populateWeeklyOptionsExpiryDates(elementId = 'weekly-options-expiry-date'){
         const expirySelect = document.getElementById(elementId);
         if(!expirySelect) return;
@@ -850,17 +878,17 @@
 
         const options = [];
         const seen = new Set();
-        // NSE moves a weekly expiry to the previous trading day when Tuesday is a holiday.
-        const expiryDateOverrides = {
-          '2026-10-20': '2026-10-19',
-          '2026-11-10': '2026-11-09'
-        };
         const pad = value => String(value).padStart(2, '0');
+        const iso = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
         for(let index = 0; options.length < 5 && index < 52; index++){
           const expiry = new Date(firstExpiry);
           expiry.setDate(firstExpiry.getDate() + (index * 7));
-          const nominalValue = expiry.getFullYear() + '-' + pad(expiry.getMonth() + 1) + '-' + pad(expiry.getDate());
-          const value = expiryDateOverrides[nominalValue] || nominalValue;
+          // NSE moves a weekly expiry to the previous trading day when Tuesday is a holiday
+          // (dates from scripts/market_holidays.txt).
+          while(MARKET_HOLIDAYS[iso(expiry)] || expiry.getDay() === 0 || expiry.getDay() === 6){
+            expiry.setDate(expiry.getDate() - 1);
+          }
+          const value = iso(expiry);
           // A holiday can move an expiry before today; do not offer that
           // already-expired date when the page is opened on the nominal day.
           if(value < localDateString()) continue;
@@ -1057,6 +1085,7 @@
         statusEl.textContent = runningStatusText(j);
         statusEl.className = j.running ? 'status-running' : 'status-stopped';
         setRunningControls(key, j.running);
+        updateRunningPnl('running-pnl-' + key);
         if(key === 'v28') renderKiteTokenStatus(j.kite_token);
       }
 
@@ -1090,6 +1119,7 @@
         statusEl.textContent = runningStatusText(j);
         statusEl.className = j.running ? 'status-running' : 'status-stopped';
         setLiveOrderOnlyControls(j.running);
+        updateRunningPnl('running-pnl-live-order-only');
       }
 
       const WEEKLY_OPTIONS_DOWNLOAD = {
@@ -1404,33 +1434,144 @@
         updateRunningPnl('running-pnl-live-order-only', logText);
       }
 
+      // ---- Running status box (v28 / v30 / live panels) ----
+      // Reads the current run's log (from its last "=== starting:" banner) and shows what the
+      // strategy is doing now: open trade P&L, waiting for market open, watching for a signal,
+      // entries stopped by a guard, finished, or crashed.
+      const lastRunLog = {};
+
+      function summarizeRunLog(logText){
+        const all = String(logText || '').split(/\r?\n/);
+        let start = 0;
+        all.forEach((line, i) => { if(line.startsWith('=== starting:')) start = i; });
+        const fresh = () => ({open: null, pnl: null, trades: 0, realized: null, lastExit: null, stoppedBy: '',
+          ended: false, netPnl: null, totalTrades: null, tradeDate: ''});
+        const s = Object.assign(fresh(), {hasRun: start > 0 || all.some(l => l.trim()), mode: '', phase: '',
+          waitAt: '', waitMin: '', error: '', rangeStep: '', rangeTotal: '', rangeDate: '', rangeDone: false,
+          rangeDays: 0, rangePnl: 0, rangeTrades: 0, rangeFailed: ''});
+        // A finished day of a range backtest is added to the range totals.
+        const closeDay = () => {
+          if(!s.rangeTotal || !s.rangeDate) return;
+          s.rangeDays += 1;
+          s.rangePnl += (s.netPnl ?? s.realized ?? 0);
+          s.rangeTrades += (s.totalTrades ?? s.trades);
+        };
+        for(const raw of all.slice(start)){
+          const l = raw.trim();
+          if(!l) continue;
+          let m;
+          if((m = l.match(/^\[(\d+)\/(\d+)\] Running: (\S+)/))){
+            closeDay();
+            Object.assign(s, fresh());
+            s.rangeStep = `${m[1]}/${m[2]}`; s.rangeTotal = m[2]; s.rangeDate = m[3]; s.tradeDate = m[3]; s.phase = '';
+          }
+          else if(/^\[DONE\] Completed \d+ runs/.test(l)){ closeDay(); s.rangeDate = ''; s.rangeDone = true; }
+          else if((m = l.match(/^\[FAILED\] \d+ date\(s\) had errors: (.+)$/))) s.rangeFailed = m[1];
+          else if((m = l.match(/^Running mode:\s*(\S+)/))) s.mode = m[1];
+          else if((m = l.match(/^\[RUN BANNER\].*?trade_date=(\S+)/))) s.tradeDate = m[1];
+          else if((m = l.match(/^Waiting for market open at (\S+) IST.*remaining~(\d+)m/))){ s.phase = 'wait_open'; s.waitAt = m[1].slice(0, 5); s.waitMin = m[2]; }
+          else if(/^Starting (PAPERTRADE_LIVE|LIVE_ORDER)/.test(l) || l.startsWith('KiteTicker connected')){ if(!s.open) s.phase = 'watching'; }
+          else if((m = l.match(/^Entered position at (\S+ \S+) \|.*?side=(\S+) symbol=(\S+) reason=(\S+) entry=([-\d.]+)/))){
+            const sl = l.match(/emergency_sl=([-\d.]+)/);
+            s.open = {time: m[1].slice(11, 16), side: m[2], symbol: m[3], reason: m[4], entry: m[5], sl: sl ? sl[1] : ''};
+            s.pnl = null; s.phase = 'in_trade';
+          }
+          // Paper/live: "Exited position at T | ... with reason R. symbol=..."; backtest: "Exited position at T with reason R. Entry=..."
+          else if((m = l.match(/^Exited position at (\S+ \S+)(?: \|.*?)? with reason (\S+)\..*?P&L: ([-\d.]+) Rs.*?Cumulative MTM: ([-\d.]+) Rs/))){
+            s.open = null; s.pnl = null; s.trades += 1; s.realized = Number(m[4]); s.phase = 'watching';
+            s.lastExit = {time: m[1].slice(11, 16), reason: m[2], pnl: Number(m[3])};
+          }
+          else if(l.startsWith('[OPEN PNL]')){
+            const f = l.match(/^\[OPEN PNL\] \S+ (\d\d:\d\d).*?ltp=([-\d.]+) \|.*?unrealized=([-\d.]+) pts \(([-\d.]+) rs\) \| realized=([-\d.]+) rs/);
+            const tr = l.match(/trailing=(.+)$/);
+            if(s.open && f) s.pnl = {at: f[1], ltp: Number(f[2]), upts: Number(f[3]), urs: Number(f[4]), realized: Number(f[5]),
+                                     trailing: tr ? tr[1].trim() : ''};
+          }
+          else if((m = l.match(/Trading stopped by\s*:\s*(.+)$/))) s.stoppedBy = m[1].trim();
+          else if(/SHUTDOWN COMPLETE/.test(l) || /^=+ RESULT =+$/.test(l)) s.ended = true;
+          else if((m = l.match(/^Net P&L \(Rs\)\s*:\s*([-\d.]+)/))) s.netPnl = Number(m[1]);
+          else if((m = l.match(/^Total trades\s*:\s*(\d+)/))) s.totalTrades = Number(m[1]);
+          else if(/^Traceback \(most recent call last\)/.test(l) || /^\[ERROR\]/.test(l)) s.error = l;
+        }
+        return s;
+      }
+
       function updateRunningPnl(elementId, logText){
         const element = document.getElementById(elementId);
         if(!element) return;
-        const lines = String(logText || '').split(/\r?\n/).filter(line => line.includes('[OPEN PNL]'));
-        if(!lines.length){
-          element.value = 'P&L: waiting for an active trade...';
+        if(logText !== undefined) lastRunLog[elementId] = logText;
+        const s = summarizeRunLog(lastRunLog[elementId]);
+        const statusEl = document.getElementById(elementId.replace('running-pnl-', 'status-'));
+        const running = !!statusEl && statusEl.classList.contains('status-running');
+        const head = (running ? '● Running' : '■ Stopped') + (s.mode ? ' · ' + s.mode : '');
+
+        if(!s.hasRun){
+          element.textContent = running ? '● Running · starting up...' : '■ Not running';
+          element.dataset.state = running ? 'running' : 'stopped';
+          return;
+        }
+        const isBacktest = s.mode === 'BACKTEST' || !!s.rangeTotal;
+        const inRange = !!s.rangeTotal && !s.rangeDone && running;
+
+        // Line 1: what the strategy is doing now.
+        let phase;
+        if(s.open && !running && !isBacktest) phase = 'process NOT running but the log shows an open trade, check positions in Kite';
+        else if(s.error) phase = 'ERROR, see the log below';
+        else if(s.rangeTotal && (s.rangeDone || !running)) phase = `backtest range finished (${s.rangeDays}/${s.rangeTotal} days)` + (s.rangeFailed ? `, failed: ${s.rangeFailed}` : '');
+        else if(inRange) phase = `backtesting day ${s.rangeStep} (${s.rangeDate})` + (s.open ? ', in a trade' : '');
+        else if(s.open) phase = isBacktest ? 'backtest in a trade' : 'in a trade';
+        else if(s.ended || !running){
+          phase = isBacktest ? 'backtest finished' : 'session finished';
+          if(s.stoppedBy) phase += ` (stopped by ${s.stoppedBy})`;
+        }
+        else if(s.stoppedBy) phase = `no new entries (${s.stoppedBy})`;
+        else if(s.phase === 'wait_open') phase = `waiting for market open at ${s.waitAt} (~${s.waitMin} min)`;
+        else if(s.phase === 'watching') phase = s.trades ? 'flat, watching for the next entry signal' : 'watching for an entry signal';
+        else phase = isBacktest ? 'backtest running...' : 'starting up...';
+        const lines = [head + ' · ' + phase];
+
+        // Finished range: totals for the whole range.
+        if(s.rangeTotal && (s.rangeDone || !running)){
+          lines.push(`Range P&L: ${todayRs(s.rangePnl)} over ${s.rangeDays} day(s)`);
+          lines.push(`Trades: ${s.rangeTrades}`);
+          element.textContent = lines.join('\n');
+          element.dataset.state = s.error || s.rangeFailed ? 'error' : 'stopped';
           return;
         }
 
-        const latestLine = lines[lines.length - 1].trim();
-        const getField = (name) => {
-          const match = latestLine.match(new RegExp('(?:^|\\|\\s*)' + name + '=([^|]*)'));
-          return match ? match[1].trim() : '';
-        };
-        const entryTime = getField('entry_time');
-        const tradeCount = getField('trade_count');
-        const symbol = getField('symbol');
-        const entry = getField('entry');
-        const ltp = getField('ltp');
-        const unrealized = getField('unrealized');
-        const realized = getField('realized');
-        const totalMtm = getField('total_mtm');
-        element.value = entryTime && tradeCount && symbol && entry && ltp && unrealized && realized && totalMtm
-          ? `Entry Time: ${entryTime} | Trade Count: ${tradeCount} | Symbol: ${symbol} | Entry: ${entry} | LTP: ${ltp} | Unrealized: ${unrealized} | Realized: ${realized} | Total MTM: ${totalMtm}`
-          : latestLine;
-      }
+        // Open / P&L / Trades for the current session (or the current day of a range).
+        let unrealizedRs = 0;
+        if(s.open){
+          let text = `${s.open.side} ${s.open.symbol} @ ${Number(s.open.entry).toFixed(2)} since ${s.open.time}`;
+          if(s.pnl){
+            unrealizedRs = s.pnl.urs;
+            text += ` → ${s.pnl.ltp.toFixed(2)} at ${s.pnl.at} (${s.pnl.upts >= 0 ? '+' : ''}${s.pnl.upts.toFixed(2)} pts, ${todayRs(s.pnl.urs)})`;
+          } else {
+            text += ' (waiting for the first P&L update)';
+          }
+          lines.push('Open: ' + text);
+          const extra = [];
+          if(s.open.reason) extra.push('signal ' + s.open.reason);
+          if(s.open.sl) extra.push('emergency SL ' + Number(s.open.sl).toFixed(2));
+          if(s.pnl && s.pnl.trailing) extra.push('trailing ' + s.pnl.trailing);
+          if(extra.length) lines.push('      ' + extra.join(' · '));
+        } else {
+          lines.push('Open: no position');
+        }
+        const realized = s.ended && s.netPnl !== null ? s.netPnl : (s.realized ?? (s.pnl ? s.pnl.realized : 0));
+        const now = new Date(), pad = n => String(n).padStart(2, '0');
+        const todayIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+        const label = !s.tradeDate || s.tradeDate === todayIso ? "Today's P&L" : `P&L (${s.tradeDate})`;
+        lines.push(`${label}: ${todayRs(realized + unrealizedRs)} (realized ${todayRs(realized)})`);
+        let tradesLine = 'Trades: ' + (s.ended && s.totalTrades !== null ? s.totalTrades : s.trades);
+        if(s.lastExit) tradesLine += ` · last exit ${s.lastExit.time} ${s.lastExit.reason} (${todayRs(s.lastExit.pnl)})`;
+        lines.push(tradesLine);
+        if(inRange && s.rangeDays) lines.push(`Range so far: ${todayRs(s.rangePnl)} over ${s.rangeDays} day(s), ${s.rangeTrades} trade(s)`);
 
+        element.textContent = lines.join('\n');
+        element.dataset.state = (s.open && !running && !isBacktest) || s.error ? 'error'
+          : s.open ? (unrealizedRs < 0 ? 'down' : 'up') : (running ? 'running' : 'stopped');
+      }
       async function startLiveOrderOnly(){
         const strategyKey = document.getElementById('strategy-live-order-only').value;
         saveLastLiveOrderStrategy(strategyKey);
@@ -2546,6 +2687,16 @@
         form.action = '/logout';
         document.body.appendChild(form);
         form.submit();
+      });
+
+      document.querySelectorAll('details.log-toggle').forEach(d => {
+        const key = 'logToggle:' + d.dataset.key;
+        try { if(localStorage.getItem(key) === 'open') d.open = true; } catch(e) {}
+        d.addEventListener('toggle', () => {
+          try { localStorage.setItem(key, d.open ? 'open' : 'closed'); } catch(e) {}
+          const pre = d.querySelector('pre');
+          if(d.open && pre) pre.scrollTop = pre.scrollHeight;   // jump to the newest lines
+        });
       });
 
       window.onload = async () => {

@@ -685,6 +685,7 @@ def index():
         client_ip=local_server_ip(),
         server_time=ist_now_str(),
         server_time_epoch=time.time(),
+        market_holidays=load_market_holidays(),
     )
 
 
