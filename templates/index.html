@@ -405,7 +405,6 @@
           <button id="logout">Logout</button>
           <button id="kiteLogin">Open Kite Login</button>
           <button id="kiteLoginTest">Test Kite Login</button>
-          <button id="stop-all-processes" style="background:#7f1d1d;color:#fff;border-color:#991b1b;font-weight:700">Stop All Running Processes</button>
           <span id="kiteStatus" style="margin-left:1rem"></span>
         </div>
         <div id="kiteTokenStatus" style="margin-top:0.4rem"></div>
@@ -526,7 +525,6 @@
           </div>
           <div class="log-files-actions">
             <button id="loadLogFiles">Refresh Log Files</button>
-            <button id="consolidateLogFiles">Consolidate Selected Logs</button>
             <button id="deleteLogFiles">Delete Selected Logs</button>
             <button id="downloadLogFile">Download Selected Log</button>
             <label style="color:#475569; font-size:0.88rem; font-weight:700;">
@@ -539,12 +537,8 @@
               <input id="onlyPapertradeFiles" type="checkbox" /> Only papertrade files
             </label>
             <label style="color:#475569; font-size:0.88rem;">
-              <input id="onlyConsolidateFiles" type="checkbox" /> Only consolidate files
-            </label>
-            <label style="color:#475569; font-size:0.88rem;">
               <input id="onlyLivetradeFiles" type="checkbox" /> Only live trade files
             </label>
-            <span id="consolidateInfo" style="font-size:0.88rem"></span>
           </div>
         </div>
       </div>
@@ -1511,42 +1505,6 @@
         }
       }
 
-      async function stopAllProcesses(){
-        const confirmed = confirm(
-          'STOP ALL RUNNING PROCESSES\\n\\n' +
-          'This will gracefully stop all strategy processes managed by this application. ' +
-          'Live runners will run their broker cleanup before exiting.\\n\\n' +
-          'Continue?'
-        );
-        if(!confirmed){
-          showInfo('Stop-all cancelled.', false);
-          return;
-        }
-
-        const button = document.getElementById('stop-all-processes');
-        if(button) button.disabled = true;
-        showInfo('Stopping all managed strategy processes...', true);
-        try{
-          const r = await fetch('/api/stop-all', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'}
-          });
-          const j = await r.json().catch(() => ({ok:false,msg:'Invalid server response'}));
-          if(!r.ok || !j.ok){
-            showInfo('Stop-all failed: ' + (j.msg || ('HTTP ' + r.status)), false);
-            return;
-          }
-          showInfo(j.msg + (j.stopped?.length ? ' Stopped: ' + j.stopped.join(', ') + '.' : ''), true);
-          await statusLiveOrderOnly();
-          await status('v28');
-          await status('v30');
-        } catch(error){
-          showInfo('Stop-all failed: ' + error.message, false);
-        } finally {
-          if(button) button.disabled = false;
-        }
-      }
-
       async function clearLogsLiveOrderOnly(){
         if(!confirm('Clear server log for LIVE_ORDER runner? This will remove existing log content.')) return;
         const r = await fetch('/api/clear-logs', {
@@ -1986,22 +1944,15 @@
         const allLogFiles = !!document.getElementById('allLogFiles')?.checked;
         const onlyBacktest = !!document.getElementById('onlyBacktestFiles')?.checked;
         const onlyPapertrade = !!document.getElementById('onlyPapertradeFiles')?.checked;
-        const onlyConsolidate = !!document.getElementById('onlyConsolidateFiles')?.checked;
         const onlyLivetrade = !!document.getElementById('onlyLivetradeFiles')?.checked;
         const filenameSearch = String(document.getElementById('logFilenameSearch')?.value || '').trim().toLowerCase();
-        const consolidateInfo = document.getElementById('consolidateInfo');
         const r = await fetch('/api/log-files');
         const j = await r.json().catch(() => ({ok:false,msg:'Invalid response',files:[]}));
         if(!r.ok || !j.ok){
           showInfo('Failed to load log files: ' + (j.msg || ('HTTP ' + r.status)), false);
-          updateConsolidateButtonState();
           return;
         }
         select.innerHTML = '';
-        if(consolidateInfo){
-          consolidateInfo.className = '';
-          consolidateInfo.textContent = '';
-        }
         const files = Array.isArray(j.files) ? j.files : [];
         const xlsxFiles = files.filter(f => /\.xlsx$/i.test(String(f?.name || '')));
         let filteredFiles = xlsxFiles;
@@ -2009,7 +1960,6 @@
         if(!allLogFiles){
           if(onlyBacktest) activeFilters.push(f => /^backtest_.*\.xlsx$/i.test(String(f?.name || '')));
           if(onlyPapertrade) activeFilters.push(f => /^papertrade_.*\.xlsx$/i.test(String(f?.name || '')));
-          if(onlyConsolidate) activeFilters.push(f => /^consolidated_.*\.xlsx$/i.test(String(f?.name || '')));
           if(onlyLivetrade) activeFilters.push(f => {
             const n = String(f?.name || '').toLowerCase();
             return n.includes('livetrade') || n.includes('live_order') || n === 'strategy_v28.log' || n === 'strategy_v30.log';
@@ -2026,7 +1976,6 @@
         const filterParts = [];
         if(onlyBacktest) filterParts.push('backtest');
         if(onlyPapertrade) filterParts.push('papertrade');
-        if(onlyConsolidate) filterParts.push('consolidate');
         if(onlyLivetrade) filterParts.push('live-trade');
         if(allLogFiles) filterParts.push('all');
         const filterLabel = filterParts.length > 0 ? filterParts.join('/') : null;
@@ -2043,7 +1992,6 @@
           showInfo(filenameSearch
             ? 'No log filenames match "' + filenameSearch + '".'
             : (filterLabel ? 'No ' + filterLabel + ' .xlsx files found.' : 'No .xlsx log files found.'), false);
-          updateConsolidateButtonState();
           return;
         }
         sortLogFiles(filteredFiles, document.getElementById('logFileSort')?.value || 'date_desc');
@@ -2054,7 +2002,6 @@
           select.appendChild(opt);
         }
         showInfo('Loaded ' + filteredFiles.length + (filterLabel ? ' ' + filterLabel : '') + ' file(s) from logs folder.', true);
-        updateConsolidateButtonState();
       }
 
       function setTradeDetailsTableRows(rows){
@@ -2240,31 +2187,6 @@
         return orderedNames.map(file => reportByFile.get(file));
       }
 
-      function isBacktestFileName(name){
-        const n = String(name || '');
-        return /^backtest_.*\.xlsx$/i.test(n) || /^papertrade_.*\.xlsx$/i.test(n);
-      }
-
-      function updateConsolidateButtonState(){
-        const sel = document.getElementById('logFileSelect');
-        const btn = document.getElementById('consolidateLogFiles');
-        const infoEl = document.getElementById('consolidateInfo');
-        if(!sel || !btn) return;
-
-        const names = Array.from(sel.selectedOptions || []).map(o => o.value).filter(Boolean);
-        if(names.length === 0){
-          btn.disabled = true;
-          return;
-        }
-
-        const hasInvalid = names.some(n => !isBacktestFileName(n));
-        btn.disabled = hasInvalid;
-        if(hasInvalid && infoEl){
-          infoEl.className = 'status-fail';
-          infoEl.textContent = 'Consolidation allows only backtest_*.xlsx or papertrade_*.xlsx selection.';
-        }
-      }
-
       function getSelectedLogFiles(){
         const sel = document.getElementById('logFileSelect');
         let names = selectedLogFileOrder.filter(name =>
@@ -2334,7 +2256,7 @@
         infoEl.className = 'status-ok';
         const totalPnlRs = Number(j.summary?.total_pnl_rs ?? 0);
         const totalPnlPoints = Number(j.summary?.total_pnl_points ?? 0);
-        infoEl.textContent = 'Loaded consolidated details from ' + names.length +
+        infoEl.textContent = 'Loaded trade details from ' + names.length +
           ' file(s). Total PnL: ' + totalPnlRs.toFixed(2) +
           ' Rs (' + totalPnlPoints.toFixed(2) + ' pts).';
       }
@@ -2418,77 +2340,6 @@
           : 'No broker history was available in this range.';
       }
 
-      async function consolidateSelectedLogs(){
-        const sel = document.getElementById('logFileSelect');
-        const btn = document.getElementById('consolidateLogFiles');
-        const infoEl = document.getElementById('consolidateInfo');
-        const names = Array.from(sel.selectedOptions || []).map(o => o.value).filter(Boolean);
-
-        if(names.length === 0){
-          infoEl.className = 'status-fail';
-          infoEl.textContent = 'Select one or more source files first.';
-          showInfo('Select files from the list to generate consolidated log.', false);
-          updateConsolidateButtonState();
-          return;
-        }
-
-        if(names.some(n => !isBacktestFileName(n))){
-          infoEl.className = 'status-fail';
-          infoEl.textContent = 'Only backtest_*.xlsx or papertrade_*.xlsx files can be consolidated.';
-          showInfo('Remove non-backtest/papertrade files from selection.', false);
-          updateConsolidateButtonState();
-          return;
-        }
-
-        btn.disabled = true;
-        infoEl.className = '';
-        infoEl.textContent = 'Generating consolidated log...';
-
-        // Update each source workbook first; consolidation copies these fields
-        // into the generated daily_summary sheet.
-        await updateGapSummaryFromBroker();
-
-        const r = await fetch('/api/log-files/consolidate', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ files: names })
-        });
-        const j = await r.json().catch(() => ({ok:false,msg:'Invalid response'}));
-
-        btn.disabled = false;
-
-        if(!r.ok || !j.ok){
-          infoEl.className = 'status-fail';
-          infoEl.textContent = 'Failed: ' + (j.msg || ('HTTP ' + r.status));
-          showInfo('Consolidation failed: ' + (j.msg || ('HTTP ' + r.status)), false);
-          updateConsolidateButtonState();
-          return;
-        }
-
-        await loadLogFilesList();
-        if(j.output_file){
-          const outputName = String(j.output_file).trim();
-          let outputOption = Array.from(sel.options || []).find(o => o.value === outputName);
-          if(!outputOption){
-            outputOption = document.createElement('option');
-            outputOption.value = outputName;
-            outputOption.textContent = outputName + ' (generated)';
-            sel.appendChild(outputOption);
-          }
-          const options = Array.from(sel.options || []);
-          for(const o of options){
-            o.selected = (o.value === outputName);
-          }
-        }
-
-        await loadTradeDetailsFromSelectedLog();
-
-        infoEl.className = 'status-ok';
-        infoEl.textContent = 'Generated: ' + (j.output_file || 'consolidated_backtest.xlsx');
-        showInfo('Consolidated log generated from ' + (j.files_processed?.length || names.length) + ' selected file(s).', true);
-        updateConsolidateButtonState();
-      }
-
       async function deleteSelectedLogFiles(){
         const names = getSelectedLogFiles();
         if(!names || names.length === 0){
@@ -2563,7 +2414,6 @@
         saveLastLiveOrderStrategy(event.target.value);
       });
       document.getElementById('stop-live-order-only').addEventListener('click', async () => { await stopLiveOrderOnly(); });
-      document.getElementById('stop-all-processes').addEventListener('click', async () => { await stopAllProcesses(); });
       document.getElementById('refresh-live-order-only').addEventListener('click', async () => { await statusLiveOrderOnly(); await loadLogsLiveOrderOnly(); });
       document.getElementById('clear-live-order-only').addEventListener('click', async () => { await clearLogsLiveOrderOnly(); });
       document.getElementById('save-editable-config').addEventListener('click', async () => {
@@ -2632,7 +2482,6 @@
 
       document.getElementById('logFileSelect').addEventListener('change', () => {
         recordSelectedLogFileOrder();
-        updateConsolidateButtonState();
       });
 
       document.getElementById('onlyBacktestFiles').addEventListener('change', async () => {
@@ -2641,11 +2490,6 @@
       });
 
       document.getElementById('onlyPapertradeFiles').addEventListener('change', async () => {
-        document.getElementById('allLogFiles').checked = false;
-        await loadLogFilesList();
-      });
-
-      document.getElementById('onlyConsolidateFiles').addEventListener('change', async () => {
         document.getElementById('allLogFiles').checked = false;
         await loadLogFilesList();
       });
@@ -2660,14 +2504,9 @@
         if(isAll){
           document.getElementById('onlyBacktestFiles').checked = false;
           document.getElementById('onlyPapertradeFiles').checked = false;
-          document.getElementById('onlyConsolidateFiles').checked = false;
           document.getElementById('onlyLivetradeFiles').checked = false;
         }
         await loadLogFilesList();
-      });
-
-      document.getElementById('consolidateLogFiles').addEventListener('click', async () => {
-        await consolidateSelectedLogs();
       });
 
       document.getElementById('deleteLogFiles').addEventListener('click', async () => {
@@ -2734,7 +2573,6 @@
         await includeDownloadedWeeklyOptionExpiries('weekly-options-files-expiry');
         await loadWeeklyOptionsFiles();
         try { await loadDailyDownloadStatus(); } catch(error) { console.error(error); }
-        updateConsolidateButtonState();
         try { await loadEditableConfig(); } catch(error) {
           const statusEl = document.getElementById('editable-config-status');
           statusEl.className = 'status-fail';

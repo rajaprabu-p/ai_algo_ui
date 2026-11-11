@@ -28,7 +28,6 @@ SCRIPTS_DIR = os.path.join(WORKDIR, "scripts")
 STRATEGY_SCRIPT = os.path.join(SCRIPTS_DIR, "v28_strategy_main.py")
 KITE_TEST_SCRIPT = os.path.join(SCRIPTS_DIR, "test_kite_login.py")
 WEEKLY_OPTIONS_SCRIPT = os.path.join(SCRIPTS_DIR, "nifty_weekly_options_daily_files_only.py")
-CONSOLIDATE_SCRIPT = os.path.join(SCRIPTS_DIR, "consolidate_backtest_logs.py")
 PID_FILE = os.path.join(WORKDIR, "strategy.pid")
 ENV_FILE = os.path.join(WORKDIR, ".env")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -2171,96 +2170,6 @@ def api_log_files_delete():
         "not_found": not_found,
         "failed": failed,
         "msg": f"Deleted {len(deleted)} file(s)",
-    })
-
-
-@app.route('/api/log-files/consolidate', methods=['POST'])
-def api_log_files_consolidate():
-    if not session.get("logged_in"):
-        return jsonify({"ok": False, "msg": "Unauthorized"}), 401
-
-    if not os.path.exists(CONSOLIDATE_SCRIPT):
-        return jsonify({"ok": False, "msg": "consolidate_backtest_logs.py not found"}), 404
-
-    data = request.get_json() or {}
-    files = data.get('files')
-    if not isinstance(files, list) or not files:
-        return jsonify({"ok": False, "msg": "Provide files as a non-empty list"}), 400
-
-    selected = []
-    for raw in files:
-        name = str(raw or '').strip()
-        if not name:
-            continue
-        safe_name = os.path.basename(name)
-        if safe_name != name:
-            continue
-        if safe_name in selected:
-            continue
-        if not safe_name.lower().endswith('.xlsx'):
-            continue
-        if safe_name.startswith('consolidated_'):
-            continue
-        full_path = os.path.join(LOGS_DIR, safe_name)
-        if os.path.isfile(full_path):
-            selected.append(safe_name)
-
-    if not selected:
-        return jsonify({
-            "ok": False,
-            "msg": "No valid .xlsx source files selected from logs"
-        }), 400
-
-    python = sys.executable or "python3"
-    cmd = [python, CONSOLIDATE_SCRIPT, "--files", *selected]
-
-    try:
-        env = os.environ.copy()
-        env.setdefault("PYTHONIOENCODING", "utf-8")
-        proc = subprocess.run(
-            cmd,
-            cwd=WORKDIR,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        return jsonify({"ok": False, "msg": "Consolidation timed out after 300 seconds"}), 500
-    except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
-
-    combined = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
-    output_file = ""
-    try:
-        candidates = []
-        for name in os.listdir(LOGS_DIR):
-            if not name.lower().endswith('.xlsx'):
-                continue
-            if not name.startswith('consolidated_'):
-                continue
-            path = os.path.join(LOGS_DIR, name)
-            if os.path.isfile(path):
-                candidates.append((os.path.getmtime(path), name))
-        if candidates:
-            candidates.sort(reverse=True)
-            output_file = candidates[0][1]
-    except Exception:
-        output_file = ""
-
-    if proc.returncode != 0:
-        return jsonify({
-            "ok": False,
-            "msg": f"Consolidation failed with exit code {proc.returncode}",
-            "output": combined,
-        }), 500
-
-    return jsonify({
-        "ok": True,
-        "msg": "Consolidated log generated",
-        "files_processed": selected,
-        "output_file": output_file,
-        "output": combined,
     })
 
 
