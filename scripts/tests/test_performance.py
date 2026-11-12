@@ -68,6 +68,20 @@ class ComputeTests(unittest.TestCase):
         r = webapp.compute_performance([])
         self.assertEqual((r["kpis"]["trades"], r["daily"]), (0, []))
 
+    def test_day_trade_list_for_the_calendar(self):
+        trades = [
+            {**t(-1266, -1340, reason="PROFIT_LOCK_HIT"), "entry_time": "2026-11-06 09:53:00", "exit_time": "2026-11-06 09:57:00",
+             "side": "CE", "symbol": "NIFTY26N0924650CE", "entry_price": 164.6, "exit_price": 146.2, "pnl_points": -18.4},
+            {**t(2784, 2700), "entry_time": "2026-11-06 09:34:00", "exit_time": "2026-11-06 09:49:00",
+             "side": "CE", "symbol": "NIFTY26N0924550CE", "entry_price": 151.4, "exit_price": 195.4, "pnl_points": 44.0},
+        ]
+        day = webapp.compute_performance([{"date": "2026-11-06", "trades": trades}])["daily"][0]
+        tl = day["trade_list"]
+        self.assertEqual([x["entry_time"] for x in tl], ["09:34", "09:53"])          # sorted by entry time
+        self.assertEqual((tl[0]["exit_time"], tl[0]["entry_price"], tl[0]["exit_price"]), ("09:49", 151.4, 195.4))
+        self.assertEqual([x["pnl"] for x in tl], [2700, -1340])                       # same (net) basis as the day total
+        self.assertEqual(sum(x["pnl"] for x in tl), day["pnl"])
+
 
 class LiveFilesTests(unittest.TestCase):
     def test_live_sessions_merged_per_day(self):

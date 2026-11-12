@@ -134,6 +134,14 @@
       background: color-mix(in srgb, var(--text-primary) 3%, transparent);
     }
     .cal-day.blank { background: transparent; }
+    .cal-day.clickable { cursor: pointer; }
+    .cal-day.clickable:hover, .cal-day.clickable:focus-visible { border-color: var(--accent); outline: none; }
+    .cal-day.selected { border: 2px solid var(--accent); }
+    .cal-detail { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+    .cal-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+    .cal-detail-title { font-weight: 600; font-size: 13px; }
+    .cal-detail-close { border: 0; background: transparent; font-size: 16px; padding: 2px 6px; color: var(--text-secondary); }
+    .cal-detail-table { overflow-x: auto; }
     .cal-day.today { border-color: var(--axis); }
     .cal-day .n { color: var(--text-muted); font-size: 15px; }
     .cal-day .p { font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -387,6 +395,7 @@
 
     // ---- Monthly calendar (Mon-Fri grid, one month at a time) ----
     let calMonth = null;   // 'YYYY-MM' being shown; kept across reloads
+    let calSelected = null; // 'YYYY-MM-DD' whose trades are shown under the calendar
     let holidays = {};     // {'YYYY-MM-DD': name} from scripts/market_holidays.txt
     const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     const fmtCompact = n => {
@@ -463,14 +472,58 @@
         if(d){
           cell.appendChild(el('div', {class: 'p'}, money(d.pnl)));
           cell.appendChild(el('div', {class: 't'}, `${d.trades} trade${d.trades === 1 ? '' : 's'}`));
-          cell.title = `${iso} (${d.weekday}): ${fmtRs(d.pnl)} from ${d.trades} trade(s)` +
+          cell.title = `${iso} (${d.weekday}): ${fmtRs(d.pnl)} from ${d.trades} trade(s) · click for details` +
             (d.gap_type ? ` · gap ${d.gap_type}` : '') + (d.cpr_type ? ` · CPR ${d.cpr_type}` : '');
+          if(d.trades){
+            cell.classList.add('clickable');
+            if(iso === calSelected) cell.classList.add('selected');
+            cell.setAttribute('role', 'button');
+            cell.setAttribute('tabindex', '0');
+            cell.setAttribute('aria-pressed', String(iso === calSelected));
+            const pick = () => { calSelected = calSelected === iso ? null : iso; renderCalendar(daily); };
+            cell.addEventListener('click', pick);
+            cell.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); pick(); } });
+          }
         }
         grid.appendChild(cell);
       }
-      box.replaceChildren(bar, sum, head, grid);
+      const parts = [bar, sum, head, grid];
+      const selDay = calSelected && calSelected.startsWith(calMonth + '-') ? g.map[calSelected] : null;
+      if(selDay) parts.push(renderDayTrades(selDay, daily));
+      box.replaceChildren(...parts);
       const active = strip.querySelector('.active');
       if(active) strip.scrollLeft = active.offsetLeft - (strip.clientWidth - active.offsetWidth) / 2;
+    }
+
+    // Trades of one calendar day, shown under the calendar.
+    function renderDayTrades(d, daily){
+      const wrap = el('div', {class: 'cal-detail', role: 'region', 'aria-label': `Trades on ${d.date}`});
+      const head = el('div', {class: 'cal-detail-head'});
+      const label = new Date(d.date + 'T00:00').toLocaleDateString(undefined, {weekday: 'short', day: 'numeric', month: 'short', year: 'numeric'});
+      const title = el('div', {class: 'cal-detail-title'});
+      title.append(`${label} · ${d.trades} trade${d.trades === 1 ? '' : 's'} · `);
+      title.appendChild(el('span', {class: d.pnl > 0 ? 'good' : d.pnl < 0 ? 'bad' : ''}, fmtRs(d.pnl)));
+      if(d.gap_type || d.cpr_type) title.append(' · ' + [d.gap_type, d.cpr_type && ('CPR ' + d.cpr_type)].filter(Boolean).join(' · '));
+      const close = el('button', {type: 'button', class: 'cal-detail-close', 'aria-label': 'Close day details'}, '✕');
+      close.addEventListener('click', () => { calSelected = null; renderCalendar(daily); });
+      head.append(title, close);
+      const px = v => (v === null || v === undefined || v === '' || isNaN(Number(v))) ? '—' : Number(v).toFixed(2);
+      const rows = d.trade_list || [];
+      const body = rows.length ? table([
+        {label: 'Entry', value: r => r.entry_time || '—'},
+        {label: 'Exit', value: r => r.exit_time || '—'},
+        {label: 'Side', value: r => r.side},
+        {label: 'Symbol', value: r => r.symbol},
+        {label: 'Entry ₹', num: true, value: r => px(r.entry_price)},
+        {label: 'Exit ₹', num: true, value: r => px(r.exit_price)},
+        {label: 'Pts', num: true, value: r => px(r.pnl_points), sign: r => Number(r.pnl_points) || 0},
+        {label: 'P&L', num: true, value: r => fmtRs(r.pnl), sign: r => r.pnl},
+        {label: 'Exit reason', value: r => r.exit_reason},
+      ], rows) : el('div', {class: 'empty'}, 'No trade details in these files.');
+      const scroller = el('div', {class: 'cal-detail-table'});
+      scroller.appendChild(body);
+      wrap.append(head, scroller);
+      return wrap;
     }
 
     function tile(label, value, cls, sub){

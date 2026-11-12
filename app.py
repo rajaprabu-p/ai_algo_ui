@@ -2026,8 +2026,16 @@ def compute_performance(days: list) -> dict:
         drawdown = round(equity - peak, 2)
         max_dd = min(max_dd, drawdown)
         weekday = _WEEKDAYS[datetime.fromisoformat(d["date"]).weekday()]
+        # Per-trade details for the calendar's day view (same P&L basis as the totals).
+        trade_list = [{
+            "entry_time": str(t.get("entry_time", ""))[11:16], "exit_time": str(t.get("exit_time", ""))[11:16],
+            "side": t.get("side", ""), "symbol": t.get("symbol", ""),
+            "entry_price": t.get("entry_price"), "exit_price": t.get("exit_price"),
+            "pnl_points": t.get("pnl_points"), "pnl": round(t[key], 2), "exit_reason": t.get("exit_reason", ""),
+        } for t in sorted(d["trades"], key=lambda t: str(t.get("entry_time", "")))]
         daily.append({"date": d["date"], "weekday": weekday, "pnl": pnl, "equity": equity, "drawdown": drawdown,
-                      "trades": len(d["trades"]), "gap_type": d.get("gap_type") or "", "cpr_type": d.get("cpr_type") or ""})
+                      "trades": len(d["trades"]), "gap_type": d.get("gap_type") or "", "cpr_type": d.get("cpr_type") or "",
+                      "trade_list": trade_list})
 
     pnls = [t[key] for t in all_trades]
     wins = [p for p in pnls if p > 0]
