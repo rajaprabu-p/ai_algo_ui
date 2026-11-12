@@ -50,6 +50,67 @@ class StrategyLogParserTests(unittest.TestCase):
         self.assertEqual(s["stopped_by"], "MAX_TRADES_REACHED")
 
 
+BACKTEST_LOG = """
+=== starting: venv/bin/python3 -u scripts/run_backtest_range.py 2026-11-12 2026-11-12 --strategy scripts/v28_strategy_main.py --mode BACKTEST ===
+[1/1] Running: 2026-11-12
+Running mode: BACKTEST
+Entered position at 2026-11-12 11:19:00+05:30 | side=PE symbol=NIFTY26N1725300PE reason=BUY_PE_MTF_BEAR_S6 entry=197.15 spot=25295.75
+[OPEN PNL] 2026-11-12 11:32:00 IST | entry_time=2026-11-12 11:19:00+05:30 | trade_count=2 | symbol=NIFTY26N1725300PE | side=PE | ltp=194.75 | entry=197.15 | qty=65 | unrealized=-2.40 pts (-156.00 rs) | realized=1560.00 rs | total_mtm=1404.00 rs
+Exited position at 2026-11-12 11:32:00+05:30 with reason LOW_MFE_EXIT. Entry=197.15 High=206.00 Exit=193.75 | P&L: -221.00 Rs (-3.40 points). Cumulative MTM: 1339.00 Rs.
+"""
+
+
+class RunModeAndPaperExcelTests(unittest.TestCase):
+    """12 Nov: a backtest run from the v28 panel replaced the paper log; the card showed a phantom open trade."""
+
+    def test_log_run_mode(self):
+        self.assertEqual(webapp.log_run_mode(BACKTEST_LOG), "BACKTEST")
+        paper = "=== starting: python -u scripts/v28_strategy_main.py --mode PAPERTRADE_LIVE ===\nKite login ok\n"
+        self.assertEqual(webapp.log_run_mode(paper), "PAPERTRADE_LIVE")             # from the start line
+        self.assertEqual(webapp.log_run_mode(BACKTEST_LOG + paper), "PAPERTRADE_LIVE")  # latest run wins
+        self.assertEqual(webapp.log_run_mode("no banner"), "")
+
+    def write_paper_xlsx(self, folder, name, trades):
+        import pandas as pd
+        with pd.ExcelWriter(Path(folder) / name) as xw:
+            pd.DataFrame(trades).to_excel(xw, sheet_name="live_trade_events", index=False)
+            pd.DataFrame([{"metric": "gap_type", "value": "GAP_DOWN"}]).to_excel(xw, sheet_name="summary", index=False)
+
+    def test_today_paper_trades_merges_sessions_and_filters(self):
+        import tempfile
+        t1 = {"entry_time": "2026-11-12 10:54:00+05:30", "exit_time": "2026-11-12 11:11:00+05:30", "side": "PE",
+              "option_symbol": "NIFTY26N1725350PE", "entry_price": 198.7, "exit_price": 212.35, "exit_reason": "TRAILING_STOP_HIT",
+              "pnl_points": 13.65, "pnl_rs": 887.25}
+        t2 = dict(t1, entry_time="2026-11-12 11:15:00+05:30", exit_time="2026-11-12 11:25:00+05:30", option_symbol="NIFTY26N1725300PE",
+                  entry_price=199.6, exit_price=198.0, exit_reason="LOW_MFE_EXIT", pnl_points=-1.6, pnl_rs=-104.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_paper_xlsx(tmp, "papertrade_12112026_105500_mtf5min_mfe_max2_sl25_v28.xlsx", [t1])
+            self.write_paper_xlsx(tmp, "papertrade_12112026_111500_mtf5min_mfe_max2_sl25_v28.xlsx", [t1, t2])  # restart repeats t1
+            self.write_paper_xlsx(tmp, "papertrade_12112026_105500_mtf5min_mfe_max2_sl25_v30.xlsx", [t2])      # other variant
+            self.write_paper_xlsx(tmp, "papertrade_11112026_105500_mtf5min_mfe_max2_sl25_v28.xlsx", [t2])      # other day
+            trades = webapp.today_paper_trades(tmp, "v28", "2026-11-12")
+        self.assertEqual([t["exit_reason"] for t in trades], ["TRAILING_STOP_HIT", "LOW_MFE_EXIT"])
+
+        # The backtest log contributes nothing; the card shows the two paper trades and no open position.
+        summary = webapp.parse_strategy_log_today(BACKTEST_LOG, "2026-11-12") if webapp.log_run_mode(BACKTEST_LOG) != "BACKTEST" \
+            else {"trades": [], "trade_count": 0, "open_position": None, "realized_rs": 0.0, "unrealized_rs": 0.0, "total_rs": 0.0, "stopped_by": ""}
+        merged = webapp.merge_today_paper_excel(summary, trades)
+        self.assertIsNone(merged["open_position"])
+        self.assertEqual(merged["trade_count"], 2)
+        self.assertEqual(merged["total_rs"], 783.25)
+        self.assertEqual((merged["trades"][0]["time"], merged["trades"][0]["entry"], merged["trades"][0]["exit"]), ("11:11", 198.7, 212.35))
+
+    def test_merge_keeps_open_position_and_newer_log_trades(self):
+        log = webapp.parse_strategy_log_today(LOG, TODAY)          # 1 closed trade + open PE (-520 unrealized)
+        excel = [{"entry_time": "2026-11-09 11:28:00+05:30", "exit_time": "2026-11-09 11:38:27+05:30", "side": "CE",
+                  "symbol": "NIFTY26N1725050CE", "entry_price": 194.35, "exit_price": 244.35,
+                  "exit_reason": "TRAILING_STOP_HIT", "pnl_points": 50.0, "pnl_rs": 3250.0}]
+        merged = webapp.merge_today_paper_excel(log, excel)
+        self.assertEqual(merged["open_position"]["symbol"], "NIFTY26N1725000PE")
+        self.assertEqual((merged["realized_rs"], merged["total_rs"]), (3250.0, 2730.0))
+        self.assertIs(webapp.merge_today_paper_excel(log, []), log)  # no Excel yet -> log as before
+
+
 class AutostartParserTests(unittest.TestCase):
     def test_statuses(self):
         def status(lines, markers=None):

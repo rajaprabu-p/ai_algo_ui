@@ -1789,6 +1789,70 @@ def parse_strategy_log_today(text: str, today: str) -> dict:
             "total_rs": round(realized + unrealized, 2), "stopped_by": stopped}
 
 
+_RUN_MODE_RE = re.compile(r"^Running mode:\s*(\S+)", re.M)
+_START_MODE_RE = re.compile(r"--mode\s+(\S+)")
+
+
+def log_run_mode(text: str) -> str:
+    """Mode of the latest run in a runner log (BACKTEST / PAPERTRADE_LIVE / LIVE_ORDER), '' if unknown."""
+    start = text.rfind("=== starting:")
+    current = text[start:] if start >= 0 else text
+    modes = _RUN_MODE_RE.findall(current)
+    if modes:
+        return modes[-1].strip().upper()
+    first_line = current.splitlines()[0] if current else ""
+    m = _START_MODE_RE.search(first_line)
+    return m.group(1).strip().upper() if m else ""
+
+
+def today_paper_trades(log_dir: str, variant: str, today: str) -> list:
+    """Today's closed paper trades for one variant from the papertrade Excel files (all sessions, any settings)."""
+    trades, seen = [], set()
+    try:
+        names = sorted(os.listdir(log_dir))
+    except OSError:
+        return []
+    for name in names:
+        info = classify_result_file(name)
+        if not info or info["source"] != "paper" or info["variant"] != variant or info["date"] != today:
+            continue
+        for t in _read_result_file(os.path.join(log_dir, name), "paper")["trades"]:
+            ident = (t["side"], t["symbol"], t["entry_time"])
+            if ident in seen:
+                continue
+            seen.add(ident)
+            trades.append(t)
+    trades.sort(key=lambda t: t.get("exit_time") or t.get("entry_time") or "")
+    return trades
+
+
+def merge_today_paper_excel(summary: dict, excel_trades: list) -> dict:
+    """Use the paper Excel trades for the Today card's closed trades (the log may hold a backtest run).
+
+    The log still supplies the open position, unrealized P&L and stop reason when it is
+    today's paper/live session. If the log already shows more closed trades (Excel is
+    written a moment later), the log's list is kept.
+    """
+    if not excel_trades or len(summary.get("trades") or []) > len(excel_trades):
+        return summary
+
+    def hhmm(value):
+        text = str(value or "")
+        return text[11:16] if len(text) >= 16 else text[:5]
+
+    trades = [{"time": hhmm(t.get("exit_time")), "side": t["side"], "symbol": t["symbol"],
+               "entry": t.get("entry_price", 0.0), "exit": t.get("exit_price", 0.0),
+               "reason": t["exit_reason"], "pnl_points": t.get("pnl_points", 0.0), "pnl_rs": t["pnl_rs"]}
+              for t in excel_trades]
+    realized = round(sum(t["pnl_rs"] for t in trades), 2)
+    unrealized = summary.get("unrealized_rs", 0.0) if summary.get("open_position") else 0.0
+    out = dict(summary)
+    out.update({"trades": trades, "trade_count": len(trades), "realized_rs": realized,
+                "unrealized_rs": round(unrealized, 2), "total_rs": round(realized + unrealized, 2),
+                "trades_source": "paper_excel"})
+    return out
+
+
 def parse_autostart_log_today(text: str, today: str, started_markers: dict) -> dict:
     """Status of today's paper auto-start from logs/scheduled_paper_start.log."""
     lines = [l.strip() for l in text.splitlines() if l.strip().startswith(f"[{today} ")]
@@ -1831,12 +1895,19 @@ def api_today():
         log_path = get_active_log_path(name)
         summary = {"trades": [], "trade_count": 0, "open_position": None, "realized_rs": 0.0,
                    "unrealized_rs": 0.0, "total_rs": 0.0, "stopped_by": ""}
+        log_mode = ""
         try:
             if os.path.exists(log_path) and datetime.fromtimestamp(os.path.getmtime(log_path), IST).date().isoformat() == today:
-                summary = parse_strategy_log_today(_read_tail(log_path), today)
+                tail = _read_tail(log_path)
+                log_mode = log_run_mode(tail)
+                # The runner's log holds whatever was run last from this panel. Only a paper/live
+                # session describes today's trading; a backtest run must not show up here.
+                if log_mode in {"PAPERTRADE_LIVE", "LIVE_ORDER"}:
+                    summary = parse_strategy_log_today(tail, today)
         except Exception:
             pass
-        strategies[name] = {"running": running, "mode": read_mode(name) if running else "", **summary}
+        summary = merge_today_paper_excel(summary, today_paper_trades(LOGS_DIR, name, today))
+        strategies[name] = {"running": running, "mode": read_mode(name) if running else "", "log_mode": log_mode, **summary}
 
     markers = {}
     for name in TODAY_STRATEGIES:
@@ -1918,7 +1989,9 @@ def _read_result_file(path: str, source: str) -> dict:
                 continue
             net = r.get("net_pnl_rs")
             out["trades"].append({
-                "entry_time": str(r.get("entry_time", "")), "side": str(r.get("side", "")),
+                "entry_time": str(r.get("entry_time", "")), "exit_time": str(r.get("exit_time", "")),
+                "entry_price": float(r.get("entry_price", 0) or 0), "exit_price": float(r.get("exit_price", 0) or 0),
+                "side": str(r.get("side", "")),
                 "symbol": str(r.get("option_symbol", "")), "exit_reason": str(r.get("exit_reason", "")),
                 "pnl_rs": float(r.get("pnl_rs")), "pnl_points": float(r.get("pnl_points", 0) or 0),
                 "net_pnl_rs": None if net is None or pd.isna(net) else float(net),

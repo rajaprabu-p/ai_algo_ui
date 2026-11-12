@@ -1307,6 +1307,8 @@
         Object.entries(j.strategies || {}).forEach(([name, s]) => {
           const rows = [['', s.running ? ('Running' + (s.mode ? ' (' + s.mode + ')' : '')) : 'Not running',
                          s.running ? 'today-ok' : 'today-muted']];
+          // The panel log now holds a backtest; paper results below come from today's paper Excel.
+          if(!s.running && s.log_mode === 'BACKTEST') rows[0][1] += ' · last panel run: backtest';
           const p = s.open_position;
           if(p){
             let text = p.side + ' ' + p.symbol + ' @ ' + Number(p.entry).toFixed(2);
