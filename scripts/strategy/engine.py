@@ -2018,6 +2018,42 @@ def option_round_trip_charges(entry_price: float, exit_price: float, qty: int) -
     return parts
 
 
+def ensure_trade_charges(trade: dict) -> dict:
+    """Fill charges_rs / net_pnl_rs on a closed trade record that lacks them.
+
+    Backtest trades get charges when they are built; several paper exit paths (tick
+    trailing exit, shutdown exit, ...) build their own records, so the first paper
+    trade of a day could have no charges and the summary under-counted them.
+    LIVE_ORDER records are left alone: their P&L is from broker fills and the
+    exact charges are on the contract note.
+    """
+    if not isinstance(trade, dict) or str(trade.get("run_mode", "")).upper() == "LIVE_ORDER":
+        return trade
+    if pd.notna(pd.to_numeric(trade.get("charges_rs"), errors="coerce")):
+        return trade
+    entry, exit_, qty = safe_float(trade.get("entry_price"), 0.0), safe_float(trade.get("exit_price"), 0.0), safe_int(trade.get("qty"), 0)
+    if entry <= 0 or exit_ <= 0 or qty <= 0:
+        return trade
+    charges = option_round_trip_charges(entry, exit_, qty)["total"]
+    trade["charges_rs"] = charges
+    trade["net_pnl_rs"] = round(safe_float(trade.get("pnl_rs"), 0.0) - charges, 2)
+    return trade
+
+
+def fill_missing_trade_charges(trades: pd.DataFrame) -> pd.DataFrame:
+    """DataFrame version of ensure_trade_charges (keeps .attrs); used before summaries."""
+    if trades is None or trades.empty:
+        return trades
+    attrs = dict(getattr(trades, "attrs", {}) or {})
+    filled = pd.DataFrame([ensure_trade_charges(dict(r)) for r in trades.to_dict("records")], index=trades.index)
+    for col in trades.columns:      # keep the original column order, new columns at the end
+        if col not in filled.columns:
+            filled[col] = trades[col]
+    filled = filled[[c for c in trades.columns] + [c for c in filled.columns if c not in trades.columns]]
+    filled.attrs.update(attrs)
+    return filled
+
+
 def is_signal_too_old(signal_ts, now_ts) -> bool:
     if signal_ts is None or now_ts is None:
         return False
@@ -2525,6 +2561,7 @@ def build_backtest_summary_df(trades: pd.DataFrame, run_mode: str, day: pd.DataF
     if trades is None or trades.empty:
         notes = "No trades found for the day with current filters."
     else:
+        trades = fill_missing_trade_charges(trades)
         total_trades = int(len(trades))
         if "pnl_rs" in trades.columns:
             winning_trades = int((trades["pnl_rs"] > 0).sum())
@@ -2886,6 +2923,14 @@ def run_after_hours_paper_replay(kite: KiteConnect, ce_symbol: str, pe_symbol: s
             prev_close=safe_float(prev_ohlc.get("close"), 0.0),
         )
     )
+    # Raw values run_single_day_test() reads for gap / CPR (same as the backtest sets).
+    day.attrs.update({
+        "nifty_prev_close": safe_float(prev_ohlc.get("close"), 0.0),
+        "nifty_prev_high": safe_float(prev_ohlc.get("high"), 0.0),
+        "nifty_prev_low": safe_float(prev_ohlc.get("low"), 0.0),
+    })
+    if spot_hist is not None and not spot_hist.empty:
+        day.attrs["nifty_day_open"] = safe_float(spot_hist.iloc[0].get("open"), 0.0)
 
     # Use BACKTEST mode logic for replay so historical symbol refresh and
     # signal construction match backtest behavior.
@@ -3141,6 +3186,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
     except Exception:
         prev_ohlc = {}
     live_ctx_day = None
+    today_open = 0.0
     try:
         today_ist = datetime.now(IST).date()
         if pd.to_datetime(trade_date).date() == today_ist:
@@ -3149,6 +3195,18 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 live_ctx_day = pd.DataFrame({"spot_open": [today_open]})
     except Exception:
         live_ctx_day = None
+    # Raw inputs for the per-rebuild run_single_day_test(): it reads these exact attrs
+    # (like the backtest sets them). Without them it took the gap from the merged
+    # table's first row (the 09:19 candle) against a rounded prev close and had no
+    # prev high/low, so paper trades logged a wrong gap (sign could flip) and no CPR,
+    # and the rebuild's gap-delay / auto-MTF could differ from the backtest.
+    live_state["market_context_attrs"] = {
+        "nifty_prev_close": safe_float(prev_ohlc.get("close"), 0.0),
+        "nifty_prev_high": safe_float(prev_ohlc.get("high"), 0.0),
+        "nifty_prev_low": safe_float(prev_ohlc.get("low"), 0.0),
+    }
+    if today_open > 0:
+        live_state["market_context_attrs"]["nifty_day_open"] = safe_float(today_open, 0.0)
 
     live_state["market_context"] = build_market_context(
         live_ctx_day,
@@ -4444,6 +4502,8 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
         day = prepare_merged_day(spot_df, ce_df, pe_df)
         for k, v in (live_state.get("market_context") or {}).items():
             day.attrs[k] = v
+        # Real day open and unrounded prev-day OHLC (overrides the rounded display value).
+        day.attrs.update(live_state.get("market_context_attrs") or {})
         live_state["last_day_debug_df"] = day.copy()
         paper_position_active = execution_mode == "PAPERTRADE_LIVE" and live_state.get("active_order_event_id") is not None
         previous_paper_open = None
@@ -4661,6 +4721,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         "target_profit_points": safe_float(paper_open.get("target_profit_points"), 50.0),
                         "trailing_status": "stage2_hit" if pd.Timestamp(paper_exit_ts).strftime("%H:%M") >= TRAILING_PROFIT_STAGE2_TIME else "stage1_hit",
                     }
+                    ensure_trade_charges(paper_trade)
                     trades = pd.concat([trades, pd.DataFrame([paper_trade])], ignore_index=True)
                     trades.attrs.update({
                         "open_position": None,
@@ -4909,6 +4970,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         pass
                     new_events_added = True
 
+                ensure_trade_charges(trade_record)
                 print(f"\n========== NEW {execution_mode} TRADE(S) ==========")
                 trade_df = pd.DataFrame([trade_record])
                 print(trade_df.to_string(index=False))
@@ -6041,6 +6103,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         "emergency_sl_price": safe_float(open_pos.get("emergency_sl_price"), np.nan),
                         "target_profit_points": safe_float(open_pos.get("target_profit_points"), 50.0),
                     }
+                    ensure_trade_charges(trade_record)
                     live_state["live_trade_events"].append(trade_record)
                     live_state["realized_live_pnl_rs"] = realized_after
                     live_state["paper_exit_pending"] = None
@@ -7545,6 +7608,7 @@ def print_summary(trades: pd.DataFrame, run_mode: str, ce_symbol: str, pe_symbol
         print("Total P&L (points): 0.00")
         print("Total P&L (Rs): 0.00")
     else:
+        trades = fill_missing_trade_charges(trades)
         total_points = float(trades["pnl_points"].sum())
         total_rs = float(trades["pnl_rs"].sum())
         win_trades = int((trades["pnl_rs"] > 0).sum())

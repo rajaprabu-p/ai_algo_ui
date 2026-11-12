@@ -523,6 +523,71 @@ class EntryCheckLogTests(StrategyTestCase):
             self.assertIn("ce=231.50 ce_conf=Y pe=180.25 pe_conf=N -> BLOCKED CE premium", line)
 
 
+class TradeChargesFillTests(StrategyTestCase):
+    """Paper exit paths that build their own records must still get charges (12 Nov: first trade had none)."""
+
+    def trade(self, **kw):
+        t = {"run_mode": "PAPERTRADE_LIVE", "entry_price": 198.70, "exit_price": 212.35, "qty": 65, "pnl_rs": 887.25}
+        t.update(kw)
+        return t
+
+    def test_missing_charges_are_filled(self):
+        for m in self.each_module():
+            t = m.ensure_trade_charges(self.trade())
+            expected = m.option_round_trip_charges(198.70, 212.35, 65)["total"]
+            self.assertEqual(t["charges_rs"], expected)
+            self.assertAlmostEqual(t["net_pnl_rs"], 887.25 - expected, places=2)
+
+    def test_nan_counts_as_missing_and_existing_values_are_kept(self):
+        for m in self.each_module():
+            self.assertFalse(math.isnan(m.ensure_trade_charges(self.trade(charges_rs=float("nan")))["charges_rs"]))
+            self.assertEqual(m.ensure_trade_charges(self.trade(charges_rs=12.5, net_pnl_rs=1.0))["charges_rs"], 12.5)
+
+    def test_live_order_and_incomplete_records_are_left_alone(self):
+        for m in self.each_module():
+            self.assertNotIn("charges_rs", m.ensure_trade_charges(self.trade(run_mode="LIVE_ORDER")))
+            self.assertNotIn("charges_rs", m.ensure_trade_charges(self.trade(exit_price=0)))
+
+    def test_dataframe_fill_keeps_attrs_and_sums_both_trades(self):
+        for m in self.each_module():
+            df = pd.DataFrame([self.trade(charges_rs=float("nan")),
+                               self.trade(entry_price=199.6, exit_price=198.0, pnl_rs=-104.0, charges_rs=77.6, net_pnl_rs=-181.6)])
+            df.attrs["guard_stop_reason"] = "MAX_TRADES_REACHED"
+            out = m.fill_missing_trade_charges(df)
+            self.assertEqual(out.attrs["guard_stop_reason"], "MAX_TRADES_REACHED")
+            self.assertEqual(list(out.columns[:len(df.columns)]), list(df.columns))
+            self.assertAlmostEqual(out["charges_rs"].sum(), m.option_round_trip_charges(198.70, 212.35, 65)["total"] + 77.6, places=2)
+
+
+class LiveGapContextTests(StrategyTestCase):
+    """12 Nov: paper logged GAP_UP +41 (09:19 candle open vs rounded prev close); the real gap was -41."""
+
+    def live_day(self, m):
+        # Merged live table starts at the 09:19 candle (open 25296), like prepare_merged_day output.
+        day = pd.DataFrame({"spot_open": [25296.0], "spot_high": [25300.0], "spot_low": [25290.0], "spot_close": [25295.45]})
+        ctx = m.build_market_context(pd.DataFrame({"spot_open": [25214.05]}), prev_high=25290.0, prev_low=25223.3, prev_close=25255.05)
+        for k, v in ctx.items():          # what the live rebuild copied before the fix (rounded display values)
+            day.attrs[k] = v
+        return day
+
+    def test_without_raw_attrs_the_09_19_open_gives_the_wrong_sign(self):
+        for m in self.each_module():
+            day = self.live_day(m)
+            ctx = m.build_market_context(day, prev_close=float(day.attrs["nifty_prev_close"]))
+            self.assertEqual(ctx["gap_type"], "GAP_UP")   # documents the old bug
+
+    def test_raw_attrs_give_the_real_gap_and_cpr(self):
+        for m in self.each_module():
+            day = self.live_day(m)
+            day.attrs.update({"nifty_prev_close": 25255.05, "nifty_prev_high": 25290.0,
+                              "nifty_prev_low": 25223.3, "nifty_day_open": 25214.05})
+            ctx = m.build_market_context(day, prev_high=day.attrs["nifty_prev_high"],
+                                         prev_low=day.attrs["nifty_prev_low"], prev_close=day.attrs["nifty_prev_close"])
+            self.assertEqual(ctx["gap_type"], "GAP_DOWN")
+            self.assertAlmostEqual(ctx["gap_points"], -41.05, places=2)
+            self.assertNotEqual(ctx["cpr_type"], "")
+
+
 class GiftNiftyTests(StrategyTestCase):
     class OkKite:
         def __init__(self):
