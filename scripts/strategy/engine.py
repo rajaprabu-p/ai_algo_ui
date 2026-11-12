@@ -263,6 +263,42 @@ _ENTRY_DIAG_SEEN: set = set()
 _ENTRY_DIAG_SEEN_MAX = 50000  # safety cap (~3 lines/minute in a normal session)
 
 
+# One "[ENTRY CHECK]" line per candle while flat, in every mode and regardless of
+# ENTRY_DIAGNOSTICS, so the log always says why there was (or was not) an entry.
+# Live modes re-run the whole day on every tick, so a candle is evaluated many
+# times: keep only its latest verdict and print it once, when a newer candle is
+# first evaluated (backtests also flush at the end of the day).
+ENABLE_ENTRY_CHECK_LOG = True
+_ENTRY_CHECK_PENDING: dict = {}
+_ENTRY_CHECK_PRINTED: set = set()
+
+
+def note_entry_check(ts, message: str) -> None:
+    if not ENABLE_ENTRY_CHECK_LOG or ts in _ENTRY_CHECK_PRINTED:
+        return
+    for older in sorted(k for k in _ENTRY_CHECK_PENDING if k < ts):
+        print(_ENTRY_CHECK_PENDING.pop(older))
+        _ENTRY_CHECK_PRINTED.add(older)
+    _ENTRY_CHECK_PENDING[ts] = message
+
+
+def flush_entry_checks() -> None:
+    for ts in sorted(_ENTRY_CHECK_PENDING):
+        print(_ENTRY_CHECK_PENDING[ts])
+        _ENTRY_CHECK_PRINTED.add(ts)
+    _ENTRY_CHECK_PENDING.clear()
+
+
+def entry_check_line(ts, mtf_trend, bull_score, bear_score, ce_confirm, pe_confirm, ce_px, pe_px, verdict) -> str:
+    trend = {1: "BULL", -1: "BEAR"}.get(mtf_trend, "FLAT")
+    return (
+        f"[ENTRY CHECK] {pd.Timestamp(ts).strftime('%H:%M')} trend={trend} "
+        f"bull={bull_score} bear={bear_score} need={ENTRY_SCORE_THRESHOLD} "
+        f"ce={safe_float(ce_px, 0.0):.2f} ce_conf={'Y' if ce_confirm else 'N'} "
+        f"pe={safe_float(pe_px, 0.0):.2f} pe_conf={'Y' if pe_confirm else 'N'} -> {verdict}"
+    )
+
+
 def print_entry_diag(message: str) -> None:
     """Print a per-candle entry diagnostic once per process (see ENTRY_DIAGNOSTICS_DEDUPE)."""
     if ENTRY_DIAGNOSTICS_DEDUPE:
@@ -6510,6 +6546,10 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
             last_pe_prev_close = None
 
         if ts < effective_tracking_start:
+            if (not in_position and ts >= tracking_start
+                    and effective_tracking_start.strftime("%H:%M") == GAP_DELAY_ENTRY_TIME):
+                note_entry_check(ts, f"[ENTRY CHECK] {ts.strftime('%H:%M')} -> WAIT gap delay, "
+                                     f"entries start {GAP_DELAY_ENTRY_TIME}")
             continue
         # Apply the same MTF candle-eligibility guard in every mode.
         # resample_to_5m() timestamps MTF candles at their completed-candle time;
@@ -6529,6 +6569,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                 if not guard_stop_reason:
                     guard_stop_reason = "NO_NEW_ENTRY_AFTER_NO_OPEN_TRADE"
                 day.loc[i, "guard_status"] = "NO_NEW_ENTRY_CUTOFF"
+                note_entry_check(ts, f"[ENTRY CHECK] {ts.strftime('%H:%M')} -> STOP no new entry after {NO_NEW_ENTRY_AFTER}")
                 break
 
             # Always block fresh entries after the configured cutoff time,
@@ -6651,6 +6692,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                 last_ce_prev_close = safe_float(row.get("ce_close"), float("nan"))
                 last_pe_prev_close = safe_float(row.get("pe_close"), float("nan"))
                 day.loc[i, "guard_status"] = "NO_NEW_ENTRY_CUTOFF"
+                note_entry_check(ts, f"[ENTRY CHECK] {ts.strftime('%H:%M')} -> STOP no new entry after {NO_NEW_ENTRY_AFTER}")
                 continue
 
             mtm_hit, mtm_reason = mtm_guard_status(realized_mtm_rs) if ENABLE_MTM_GUARD else (False, '')
@@ -6658,6 +6700,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
             if mtm_hit:
                 guard_stop_reason = mtm_reason
                 day.loc[i, "guard_status"] = guard_stop_reason
+                note_entry_check(ts, f"[ENTRY CHECK] {ts.strftime('%H:%M')} -> STOP {mtm_reason}")
                 break
 
             # trade_count resets on every incremental rebuild. Use the
@@ -6671,6 +6714,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
             if trade_guard_hit:
                 guard_stop_reason = "MAX_TRADES_REACHED"
                 day.loc[i, "guard_status"] = guard_stop_reason
+                note_entry_check(ts, f"[ENTRY CHECK] {ts.strftime('%H:%M')} -> STOP MAX_TRADES_REACHED ({max_trades_cfg})")
                 break
 
             swing_slice = day.iloc[max(0, i - SWING_LOOKBACK):i]
@@ -6687,6 +6731,14 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
 
             ce_log_prev = safe_float(ce_prev_close, 0.0)
             pe_log_prev = safe_float(pe_prev_close, 0.0)
+
+            # [ENTRY CHECK] summary for this candle (log only; no effect on decisions).
+            _ce_ready = mtf_trend == 1 and bull_score >= ENTRY_SCORE_THRESHOLD and ce_confirm and allow_ce_entries
+            _pe_ready = mtf_trend == -1 and bear_score >= ENTRY_SCORE_THRESHOLD and pe_confirm and allow_pe_entries
+
+            def _check(verdict: str) -> None:
+                note_entry_check(ts, entry_check_line(ts, mtf_trend, bull_score, bear_score, ce_confirm, pe_confirm,
+                                                      row.get("ce_close"), row.get("pe_close"), verdict))
 
             # Log entry signal analysis for diagnostics. Include source timestamps
             # and prices so live/backtest parity can be compared row by row.
@@ -6723,6 +6775,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                     last_ce_prev_close = safe_float(row.get("ce_close"), float("nan"))
                     last_pe_prev_close = safe_float(row.get("pe_close"), float("nan"))
                     day.loc[i, "guard_status"] = "REENTRY_COOLDOWN"
+                    _check(f"WAIT re-entry cooldown {_backtest_cooldown_mins} min after last exit")
                     continue
 
             # Prevent re-entry on the same option symbol shortly after a completed trade
@@ -6737,6 +6790,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                 last_ce_prev_close = safe_float(row.get("ce_close"), float("nan"))
                 last_pe_prev_close = safe_float(row.get("pe_close"), float("nan"))
                 day.loc[i, "guard_status"] = "SAME_SYMBOL_COOLDOWN"
+                _check(f"WAIT same-symbol cooldown {cooldown_mins} min ({candidate_symbol})")
                 continue
 
             # Price-drop gate: after a same-symbol exit, only re-enter once the option
@@ -6748,6 +6802,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                     last_ce_prev_close = safe_float(row.get("ce_close"), float("nan"))
                     last_pe_prev_close = safe_float(row.get("pe_close"), float("nan"))
                     day.loc[i, "guard_status"] = "SAME_SYMBOL_MIN_DROP_NOT_MET"
+                    _check(f"WAIT same symbol must drop {_min_drop:g} pts below last exit {last_completed_exit_price:.2f}")
                     continue
 
             # Do not enter options whose signal premium is above the configured
@@ -6764,6 +6819,8 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                 last_ce_prev_close = safe_float(row.get("ce_close"), float("nan"))
                 last_pe_prev_close = safe_float(row.get("pe_close"), float("nan"))
                 day.loc[i, "guard_status"] = "ENTRY_PREMIUM_TOO_HIGH"
+                _cap_txt = f"{'CE' if mtf_trend == 1 else 'PE'} premium {candidate_premium:.2f} > {safe_float(MAX_ENTRY_PREMIUM, 0.0):g}"
+                _check(f"BLOCKED {_cap_txt} (signal ready)" if (_ce_ready or _pe_ready) else f"no signal ({_cap_txt} anyway)")
                 if ENTRY_DIAGNOSTICS:
                     print_entry_diag(
                         f"[ENTRY BLOCK] premium={candidate_premium:.2f} "
@@ -6844,6 +6901,18 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                     day.loc[i, "guard_status"] = f"MTF_NOT_BEAR(mtf={mtf_trend},bear_s={bear_score})"
             elif mtf_trend == -1 and bear_score >= ENTRY_SCORE_THRESHOLD and pe_confirm and not allow_pe_entries:
                 day.loc[i, "guard_status"] = "PE_DISABLED_BY_CONFIG"
+
+            if in_position:
+                _check(f"ENTRY {side} {entry_option_symbol} @ {entry_price:.2f} ({entry_reason})")
+            elif bull_score >= ENTRY_SCORE_THRESHOLD and ce_confirm and mtf_trend != 1:
+                _check("no entry: CE signal but 5m trend not BULL")
+            elif bear_score >= ENTRY_SCORE_THRESHOLD and pe_confirm and mtf_trend != -1:
+                _check("no entry: PE signal but 5m trend not BEAR")
+            elif (mtf_trend == 1 and bull_score >= ENTRY_SCORE_THRESHOLD and ce_confirm) or \
+                    (mtf_trend == -1 and bear_score >= ENTRY_SCORE_THRESHOLD and pe_confirm):
+                _check("no entry: side disabled in settings")
+            else:
+                _check("no signal")
 
             last_ce_prev_close = safe_float(row.get("ce_close"), float("nan"))
             last_pe_prev_close = safe_float(row.get("pe_close"), float("nan"))
@@ -7100,6 +7169,8 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
                 if exit_reason in {"DAILY_PROFIT_TARGET", "DAILY_LOSS_LIMIT"} or (guard_stop_reason and ("CONSECUTIVE_LOSSES" in guard_stop_reason or guard_stop_reason == "DAILY_PROFIT_TARGET")):
                     break
     
+    if run_mode == "BACKTEST":
+        flush_entry_checks()
     result = pd.DataFrame(trades)
     if not guard_stop_reason and len(trades) > 0:
         last_exit_reason = trades[-1].get("exit_reason") if isinstance(trades, list) else trades.iloc[-1].get("exit_reason")

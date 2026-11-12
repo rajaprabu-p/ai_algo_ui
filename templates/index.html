@@ -1445,7 +1445,7 @@
         let start = 0;
         all.forEach((line, i) => { if(line.startsWith('=== starting:')) start = i; });
         const fresh = () => ({open: null, pnl: null, trades: 0, realized: null, lastExit: null, stoppedBy: '',
-          ended: false, netPnl: null, totalTrades: null, tradeDate: ''});
+          ended: false, netPnl: null, totalTrades: null, tradeDate: '', lastCheck: null});
         const s = Object.assign(fresh(), {hasRun: start > 0 || all.some(l => l.trim()), mode: '', phase: '',
           waitAt: '', waitMin: '', error: '', rangeStep: '', rangeTotal: '', rangeDate: '', rangeDone: false,
           rangeDays: 0, rangePnl: 0, rangeTrades: 0, rangeFailed: ''});
@@ -1487,6 +1487,7 @@
             if(s.open && f) s.pnl = {at: f[1], ltp: Number(f[2]), upts: Number(f[3]), urs: Number(f[4]), realized: Number(f[5]),
                                      trailing: tr ? tr[1].trim() : ''};
           }
+          else if((m = l.match(/^\[ENTRY CHECK\] (\d\d:\d\d) .*?-> (.+)$/))) s.lastCheck = {time: m[1], verdict: m[2].trim()};
           else if((m = l.match(/Trading stopped by\s*:\s*(.+)$/))) s.stoppedBy = m[1].trim();
           else if(/SHUTDOWN COMPLETE/.test(l) || /^=+ RESULT =+$/.test(l)) s.ended = true;
           else if((m = l.match(/^Net P&L \(Rs\)\s*:\s*([-\d.]+)/))) s.netPnl = Number(m[1]);
@@ -1529,6 +1530,8 @@
         else if(s.phase === 'watching') phase = s.trades ? 'flat, watching for the next entry signal' : 'watching for an entry signal';
         else phase = isBacktest ? 'backtest running...' : 'starting up...';
         const lines = [head + ' · ' + phase];
+        // Why there is no entry right now: the latest [ENTRY CHECK] verdict from the engine.
+        if(!s.open && s.lastCheck && running && !s.ended) lines.push(`Last check ${s.lastCheck.time}: ${s.lastCheck.verdict}`);
 
         // Finished range: totals for the whole range.
         if(s.rangeTotal && (s.rangeDone || !running)){

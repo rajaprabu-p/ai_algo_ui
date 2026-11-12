@@ -484,6 +484,45 @@ class EntryDiagnosticsDedupeTests(StrategyTestCase):
             self.assertEqual(len(self.capture(m, [["x"], ["x"]], dedupe=False)), 2)
 
 
+class EntryCheckLogTests(StrategyTestCase):
+    """[ENTRY CHECK]: one line per candle with its final verdict, even when live replays the day."""
+
+    def run_notes(self, m, notes, flush=False):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with mock.patch.object(m, "_ENTRY_CHECK_PENDING", {}), mock.patch.object(m, "_ENTRY_CHECK_PRINTED", set()), \
+                contextlib.redirect_stdout(out):
+            for ts, msg in notes:
+                m.note_entry_check(pd.Timestamp(ts), msg)
+            if flush:
+                m.flush_entry_checks()
+        return out.getvalue().splitlines()
+
+    def test_live_replays_print_each_candle_once_with_latest_verdict(self):
+        notes = [
+            ("2026-11-12 10:41", "10:41 no signal"),
+            ("2026-11-12 10:42", "10:42 no signal"),             # forming candle, first tick
+            ("2026-11-12 10:41", "10:41 replayed"),               # rebuild replays the day: ignored
+            ("2026-11-12 10:42", "10:42 BLOCKED premium"),        # same candle, later tick: replaces
+            ("2026-11-12 10:43", "10:43 no signal"),              # new candle -> 10:42 is final, printed
+        ]
+        for m in self.each_module():
+            self.assertEqual(self.run_notes(m, notes), ["10:41 no signal", "10:42 BLOCKED premium"])
+
+    def test_backtest_flush_prints_the_last_candle(self):
+        for m in self.each_module():
+            self.assertEqual(self.run_notes(m, [("2026-11-12 11:59", "a"), ("2026-11-12 12:00", "b")], flush=True), ["a", "b"])
+
+    def test_line_format(self):
+        for m in self.each_module():
+            line = m.entry_check_line(pd.Timestamp("2026-11-12 10:42", tz="Asia/Kolkata"), 1, 6, 1, True, False,
+                                      231.5, 180.25, "BLOCKED CE premium 231.50 > 200 (signal ready)")
+            self.assertTrue(line.startswith("[ENTRY CHECK] 10:42 trend=BULL bull=6 bear=1 need="))
+            self.assertIn("ce=231.50 ce_conf=Y pe=180.25 pe_conf=N -> BLOCKED CE premium", line)
+
+
 class GiftNiftyTests(StrategyTestCase):
     class OkKite:
         def __init__(self):
