@@ -56,6 +56,21 @@
       --gain: #3987e5; --loss: #e66767; --good-text: #0ca30c; --bad-text: #ff8a80;
     }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    /* Compare view: categorical slots 1-2 of the dataviz palette (validated, light + dark). */
+    :root { --series-v28: #2a78d6; --series-v30: #eb6834; }
+    @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) { --series-v28: #3987e5; --series-v30: #d95926; } }
+    :root[data-theme="dark"] { --series-v28: #3987e5; --series-v30: #d95926; }
+    .cmp-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--text-secondary); margin: -2px 0 6px; }
+    .cmp-legend .sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+    .cmp-legend b { color: var(--text-primary); font-weight: 600; }
+    .cmp-table { overflow-x: auto; }
+    .cmp-settings { width: 300px; max-width: 100%; text-overflow: ellipsis; }
+    @media (max-width: 700px) {
+      .filters label.compare-only { flex-basis: 100%; }
+      .cmp-settings { width: 100%; }
+    }
+    .cmp-table td.better { font-weight: 600; color: var(--text-primary); }
     body {
       margin: 0; padding: 16px; min-height: 100vh; color: var(--text-primary);
       background-color: var(--page); background-image: var(--page-bg); background-attachment: fixed;
@@ -79,11 +94,12 @@
     }
     .filters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: end; margin-bottom: 12px; }
     .filters label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-secondary); }
+    .filters + .filters { margin-top: -4px; }   /* second filter row: view / strategy / settings */
     select, input, button {
       font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border);
       background: var(--surface); color: var(--text-primary);
     }
-    select#settings { max-width: 360px; }
+    select#settings { max-width: 480px; }
     button { cursor: pointer; }
     button.active { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
     .basis { font-size: 12px; color: var(--text-secondary); margin: -4px 0 12px; }
@@ -205,14 +221,51 @@
     <label>Source
       <select id="source"><option value="backtest">Backtest</option><option value="paper">Paper trading</option><option value="live">Live trading</option></select>
     </label>
-    <label>Strategy
+  </div>
+  <div class="filters" role="group" aria-label="View and strategy">
+    <label>View
+      <span style="display:flex; gap:4px">
+        <button type="button" data-view="single" class="active">One strategy</button>
+        <button type="button" data-view="compare">Compare v28 vs v30</button>
+      </span>
+    </label>
+    <label class="single-only">Strategy
       <select id="variant"><option value="v28">v28</option><option value="v30">v30</option></select>
     </label>
-    <label>Settings
+    <label class="single-only">Settings
       <select id="settings"></select>
+    </label>
+    <label class="compare-only" hidden>v28 settings
+      <select id="settings-v28" class="cmp-settings"></select>
+    </label>
+    <label class="compare-only" hidden>v30 settings
+      <select id="settings-v30" class="cmp-settings"></select>
     </label>
   </div>
   <div id="basis" class="basis"></div>
+
+  <div id="compare" hidden>
+    <div class="card">
+      <h2>v28 vs v30</h2>
+      <div id="cmp-table" class="cmp-table"></div>
+    </div>
+    <div class="card">
+      <h2>Equity curves (cumulative P&amp;L)</h2>
+      <div id="cmp-legend" class="cmp-legend"></div>
+      <div id="cmp-equity" class="chart" role="img" aria-label="Equity curves of v28 and v30"></div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h2>By month</h2>
+        <div id="cmp-month" class="table-wrap"></div>
+      </div>
+      <div class="card">
+        <h2>Daily P&amp;L side by side</h2>
+        <div id="cmp-days-sum" class="cal-sum"></div>
+        <div id="cmp-days" class="table-wrap"></div>
+      </div>
+    </div>
+  </div>
 
   <div id="content">
     <div id="kpis" class="kpis"></div>
@@ -279,10 +332,10 @@
       return ticks;
     }
 
-    function chartFrame(container, values){
+    function chartFrame(container, values, rightPad = 12){
       container.replaceChildren();
       const w = Math.max(280, container.clientWidth), h = container.clientHeight || 220;
-      const m = {top: 10, right: 12, bottom: 24, left: 64};
+      const m = {top: 10, right: rightPad, bottom: 24, left: 64};
       const lo = Math.min(0, ...values), hi = Math.max(0, ...values);
       const ticks = niceTicks(lo, hi);
       const yMin = ticks[0], yMax = ticks[ticks.length - 1];
@@ -573,6 +626,7 @@
     }
 
     async function load(keepSettings = true){
+      if(view === 'compare') return loadCompare(keepSettings);
       const content = document.getElementById('content');
       content.classList.add('loading');
       const params = new URLSearchParams({
@@ -649,6 +703,209 @@
       ], [...result.daily].reverse()));
     }
 
+    // ---- Compare view: v28 vs v30 on the same source and date range ----
+    let view = 'single';
+    const CMP = [
+      {variant: 'v28', color: () => css('--series-v28')},
+      {variant: 'v30', color: () => css('--series-v30')},
+    ];
+
+    function fillSettingsFor(selectId, variant, selected){
+      const source = document.getElementById('source').value;
+      const sel = document.getElementById(selectId);
+      const options = groups.filter(g => g.source === source && g.variant === variant);
+      sel.replaceChildren(...options.map(g => {
+        const o = el('option', {value: g.settings, title: `${g.settings} — ${g.days} day(s), ${g.first} to ${g.last}`},
+          `${g.settings} · ${g.days} days`);
+        if(g.settings === selected) o.selected = true;
+        return o;
+      }));
+    }
+
+    async function loadCompare(keepSettings = true){
+      const box = document.getElementById('compare');
+      box.classList.add('loading');
+      const common = {source: document.getElementById('source').value,
+                      from: document.getElementById('from').value, to: document.getElementById('to').value};
+      let res;
+      try {
+        res = await Promise.all(CMP.map(async c => {
+          const settings = keepSettings ? (document.getElementById('settings-' + c.variant).value || '') : '';
+          const r = await fetch('/api/performance?' + new URLSearchParams({...common, variant: c.variant, settings}));
+          if(r.status === 401){ location.href = '/login'; throw new Error('login'); }
+          return r.json();
+        }));
+      } catch(error) {
+        document.getElementById('basis').textContent = 'Could not load performance data: ' + error.message;
+        box.classList.remove('loading');
+        return;
+      }
+      groups = res[0].groups || [];
+      CMP.forEach((c, i) => fillSettingsFor('settings-' + c.variant, c.variant, res[i].selected && res[i].selected.settings));
+      renderCompare(CMP.map((c, i) => ({...c, result: res[i].result, settings: res[i].selected && res[i].selected.settings})));
+      box.classList.remove('loading');
+    }
+
+    function compareChart(container, dates, series){
+      const all = series.flatMap(s => s.values);
+      const f = chartFrame(container, all.length ? all : [0], 40);
+      const n = dates.length;
+      const xAt = i => n === 1 ? (f.m.left + f.w - f.m.right) / 2 : f.m.left + (f.w - f.m.left - f.m.right) * i / (n - 1);
+      const ends = [];
+      series.forEach(s => {
+        const pts = s.values.map((v, i) => [xAt(i), f.y(v)]);
+        s.pts = pts;
+        f.svg.appendChild(el('svg:path', {d: 'M' + pts.map(p => p.join(',')).join(' L'), fill: 'none', stroke: s.color,
+          'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke'}));
+        if(pts.length) ends.push({s, y: pts[pts.length - 1][1]});
+      });
+      // Direct labels at the line ends (text in ink, not series colour), nudged apart if they collide.
+      ends.sort((a, b) => a.y - b.y);
+      for(let k = 1; k < ends.length; k++) if(ends[k].y - ends[k - 1].y < 12) ends[k].y = ends[k - 1].y + 12;
+      ends.forEach(e => f.svg.appendChild(el('svg:text', {x: f.w - f.m.right + 4, y: e.y + 4, 'font-size': 11,
+        fill: css('--text-secondary')}, e.s.name)));
+      xLabels(f, n, xAt, dates);
+      const cross = el('svg:line', {y1: f.m.top, y2: f.h - f.m.bottom, stroke: css('--axis'), 'stroke-width': 1, visibility: 'hidden'});
+      f.svg.appendChild(cross);
+      const dots = series.map(s => {
+        const d = el('svg:circle', {r: 4, fill: s.color, stroke: css('--surface'), 'stroke-width': 2, visibility: 'hidden'});
+        f.svg.appendChild(d);
+        return d;
+      });
+      const hit = el('svg:rect', {x: f.m.left, y: 0, width: f.w - f.m.left - f.m.right, height: f.h, fill: 'transparent', tabindex: 0});
+      f.svg.appendChild(hit);
+      const show = i => {
+        const x = xAt(i);
+        cross.setAttribute('x1', x); cross.setAttribute('x2', x); cross.setAttribute('visibility', 'visible');
+        series.forEach((s, k) => { dots[k].setAttribute('cx', x); dots[k].setAttribute('cy', s.pts[i][1]); dots[k].setAttribute('visibility', 'visible'); });
+        const top = Math.min(...series.map(s => s.pts[i][1]));
+        showTip(f, x * container.clientWidth / f.w, top, [['k', dates[i]],
+          ...series.map(s => ['v', `${s.name} ${fmtRs(s.values[i])}`, s.color])]);
+      };
+      hit.addEventListener('pointermove', e => {
+        const r = f.svg.getBoundingClientRect();
+        const x = (e.clientX - r.left) * f.w / r.width;
+        let best = 0;
+        for(let i = 0; i < n; i++) if(Math.abs(xAt(i) - x) < Math.abs(xAt(best) - x)) best = i;
+        show(best);
+      });
+      hit.addEventListener('focus', () => show(n - 1));
+      const hide = () => { f.tip.style.display = 'none'; cross.setAttribute('visibility', 'hidden'); dots.forEach(d => d.setAttribute('visibility', 'hidden')); };
+      hit.addEventListener('pointerleave', hide); hit.addEventListener('blur', hide);
+    }
+
+    function renderCompare(items){
+      const basis = document.getElementById('basis');
+      const ids = ['cmp-table', 'cmp-equity', 'cmp-month', 'cmp-days'];
+      const ok = items.filter(it => it.result && it.result.daily.length);
+      document.getElementById('cmp-legend').replaceChildren();
+      document.getElementById('cmp-days-sum').textContent = '';
+      if(ok.length < 2){
+        basis.textContent = ok.length ? `Only ${ok[0].variant} has results for this selection.` : '';
+        ids.forEach(id => document.getElementById(id).replaceChildren(el('div', {class: 'empty'}, 'Both v28 and v30 need results for this selection to compare.')));
+        return;
+      }
+      const [a, b] = items;
+      const ka = a.result.kpis, kb = b.result.kpis;
+      basis.textContent = `v28: ${a.settings} · v30: ${b.settings}. ` + (ka.basis === kb.basis
+        ? (ka.basis === 'net' ? 'Both net of slippage and charges.' : 'Both before charges.')
+        : 'Note: one side is net of charges and the other is not, so totals are not like for like.');
+
+      // Metrics side by side. hi = higher is better, lo = lower is better, '' = no winner.
+      const pf = v => v === null ? '—' : v.toFixed(2);
+      const metrics = [
+        ['Net P&L', 'net_pnl', 'hi', fmtRs], ['Trades', 'trades', '', String], ['Win rate', 'win_rate', 'hi', v => v.toFixed(1) + '%'],
+        ['Profit factor', 'profit_factor', 'hi', pf], ['Avg per trade', 'avg_per_trade', 'hi', fmtRs],
+        ['Max drawdown', 'max_drawdown', 'hi', fmtRs], ['Best day', 'best_day', 'hi', fmtRs], ['Worst day', 'worst_day', 'hi', fmtRs],
+        ['Trading days', 'trading_days', '', String], ['Losing days', 'losing_days', 'lo', String],
+      ];
+      const tbl = el('table');
+      const hr = el('tr');
+      ['', 'v28', 'v30', 'v30 − v28', 'Better'].forEach((h, i) => hr.appendChild(el('th', i ? {class: i < 4 ? 'num' : ''} : {}, h)));
+      tbl.appendChild(el('thead')).appendChild(hr);
+      const body = el('tbody');
+      metrics.forEach(([label, key, dir, fmt]) => {
+        const va = ka[key], vb = kb[key];
+        const tr = el('tr');
+        tr.appendChild(el('td', {}, label));
+        let better = '';
+        if(dir && va !== null && vb !== null && va !== vb) better = (dir === 'hi' ? vb > va : vb < va) ? 'v30' : 'v28';
+        [['v28', va], ['v30', vb]].forEach(([v, val]) => tr.appendChild(el('td', {class: 'num' + (better === v ? ' better' : '')}, fmt(val))));
+        const diff = (va === null || vb === null) ? '—'
+          : (key === 'win_rate' ? `${(vb - va) >= 0 ? '+' : '−'}${Math.abs(vb - va).toFixed(1)} pts`
+          : key === 'profit_factor' ? `${(vb - va) >= 0 ? '+' : '−'}${Math.abs(vb - va).toFixed(2)}`
+          : ['trades', 'trading_days', 'losing_days'].includes(key) ? `${(vb - va) >= 0 ? '+' : '−'}${Math.abs(vb - va)}`
+          : fmtRs(vb - va));
+        tr.appendChild(el('td', {class: 'num'}, diff));
+        tr.appendChild(el('td', {}, better || '—'));
+        body.appendChild(tr);
+      });
+      tbl.appendChild(body);
+      document.getElementById('cmp-table').replaceChildren(tbl);
+
+      // Equity curves on the union of dates (a missing day carries the equity forward).
+      const byDate = items.map(it => Object.fromEntries(it.result.daily.map(d => [d.date, d])));
+      const dates = [...new Set(items.flatMap(it => it.result.daily.map(d => d.date)))].sort();
+      const series = items.map((it, k) => {
+        let eq = 0;
+        const values = dates.map(dt => { if(byDate[k][dt]) eq = byDate[k][dt].equity; return eq; });
+        return {name: it.variant, color: it.color(), values};
+      });
+      const legend = document.getElementById('cmp-legend');
+      series.forEach(s => {
+        const item = el('span');
+        item.appendChild(el('span', {class: 'sw', style: `background:${s.color}`}));
+        item.append(`${s.name} `);
+        item.appendChild(el('b', {}, fmtRs(s.values[s.values.length - 1] || 0)));
+        legend.appendChild(item);
+      });
+      compareChart(document.getElementById('cmp-equity'), dates, series);
+
+      // By month.
+      const months = [...new Set(dates.map(d => d.slice(0, 7)))].sort().reverse();
+      const monthRows = months.map(mo => {
+        const sum = k => items[k].result.daily.filter(d => d.date.startsWith(mo)).reduce((t, d) => t + d.pnl, 0);
+        const label = new Date(mo + '-01T00:00').toLocaleDateString(undefined, {month: 'short', year: 'numeric'});
+        return {label, a: sum(0), b: sum(1)};
+      });
+      document.getElementById('cmp-month').replaceChildren(table([
+        {label: 'Month', value: r => r.label},
+        {label: 'v28', num: true, value: r => fmtRs(r.a), sign: r => r.a},
+        {label: 'v30', num: true, value: r => fmtRs(r.b), sign: r => r.b},
+        {label: 'v30 − v28', num: true, value: r => fmtRs(r.b - r.a)},
+      ], monthRows));
+
+      // Day by day.
+      let aWins = 0, bWins = 0, same = 0;
+      const dayRows = dates.map(dt => {
+        const da = byDate[0][dt], db = byDate[1][dt];
+        const pa = da ? da.pnl : 0, pb = db ? db.pnl : 0;
+        if(Math.abs(pa - pb) < 0.5) same++; else if(pb > pa) bWins++; else aWins++;
+        return {date: dt, weekday: (da || db).weekday, a: pa, b: pb, ta: da ? da.trades : 0, tb: db ? db.trades : 0};
+      }).reverse();
+      document.getElementById('cmp-days-sum').textContent =
+        `${dates.length} day(s): v28 better on ${aWins}, v30 better on ${bWins}, same on ${same}`;
+      document.getElementById('cmp-days').replaceChildren(table([
+        {label: 'Date', value: r => r.date}, {label: 'Day', value: r => r.weekday},
+        {label: 'v28', num: true, value: r => `${fmtRs(r.a)} (${r.ta})`, sign: r => r.a},
+        {label: 'v30', num: true, value: r => `${fmtRs(r.b)} (${r.tb})`, sign: r => r.b},
+        {label: 'v30 − v28', num: true, value: r => fmtRs(r.b - r.a)},
+      ], dayRows));
+    }
+
+    function setView(next){
+      view = next;
+      document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+      document.querySelectorAll('.single-only').forEach(n => { n.hidden = view !== 'single'; });
+      document.querySelectorAll('.compare-only').forEach(n => { n.hidden = view !== 'compare'; });
+      document.getElementById('content').hidden = view !== 'single';
+      document.getElementById('compare').hidden = view !== 'compare';
+      try { localStorage.setItem('perfView', view); } catch(e) {}
+      load(false);
+    }
+    document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+    document.querySelectorAll('.cmp-settings').forEach(s => s.addEventListener('change', () => load()));
+
     document.querySelectorAll('[data-preset]').forEach(btn => btn.addEventListener('click', () => {
       preset = btn.dataset.preset;
       document.querySelectorAll('[data-preset]').forEach(b => b.classList.toggle('active', b === btn));
@@ -666,7 +923,9 @@
     document.getElementById('settings').addEventListener('change', () => load());
     let resizeTimer;
     window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => load(), 200); });
-    load(false);
+    let savedView = 'single';
+    try { savedView = localStorage.getItem('perfView') === 'compare' ? 'compare' : 'single'; } catch(e) {}
+    if(savedView === 'compare') setView('compare'); else load(false);
   </script>
 </body>
 </html>
