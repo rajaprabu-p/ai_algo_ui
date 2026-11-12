@@ -240,6 +240,8 @@
       .today-bad { color: #b91c1c; font-weight: 600; }
       .today-warn { color: #92400e; font-weight: 600; }
       .today-muted { color: #475569; }
+      .today-fold > summary { cursor: pointer; }
+      .today-fold > div.row { margin-left: 1rem; font-size: 0.85rem; }
       .status-running { color: #166534; font-weight: 700; }
       .status-stopped { color: #b91c1c; font-weight: 700; }
       .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1rem; }
@@ -1210,25 +1212,46 @@
         document.getElementById('weekly-options-files-info').textContent = 'Found ' + j.files.length + ' CSV file(s).';
       }
 
+      // Foldable rows stay open across the 15-second refresh (remembered by key).
+      const todayOpenFolds = new Set();
+
+      function todayRow(tag, [label, value, cls]){
+        const row = document.createElement(tag);
+        row.className = 'row';
+        if(label){
+          const strong = document.createElement('strong');
+          strong.textContent = label + ': ';
+          row.appendChild(strong);
+        }
+        const span = document.createElement('span');
+        span.textContent = value;
+        if(cls) span.className = cls;
+        row.appendChild(span);
+        return row;
+      }
+
+      // rows: [label, value, cls] or {fold: key, summary: [label, value, cls], items: [[label, value, cls], ...]}
       function todayCard(title, rows){
         const card = document.createElement('div');
         card.className = 'today-card';
         const h = document.createElement('h3');
         h.textContent = title;
         card.appendChild(h);
-        rows.forEach(([label, value, cls]) => {
-          const row = document.createElement('div');
-          row.className = 'row';
-          if(label){
-            const strong = document.createElement('strong');
-            strong.textContent = label + ': ';
-            row.appendChild(strong);
+        rows.forEach(r => {
+          if(!Array.isArray(r) && r && r.fold){
+            if(!r.items || !r.items.length){ card.appendChild(todayRow('div', r.summary)); return; }
+            const details = document.createElement('details');
+            details.className = 'today-fold';
+            details.open = todayOpenFolds.has(r.fold);
+            details.appendChild(todayRow('summary', r.summary));
+            r.items.forEach(item => details.appendChild(todayRow('div', item)));
+            details.addEventListener('toggle', () => {
+              if(details.open) todayOpenFolds.add(r.fold); else todayOpenFolds.delete(r.fold);
+            });
+            card.appendChild(details);
+            return;
           }
-          const span = document.createElement('span');
-          span.textContent = value;
-          if(cls) span.className = cls;
-          row.appendChild(span);
-          card.appendChild(row);
+          card.appendChild(todayRow('div', r));
         });
         return card;
       }
@@ -1295,12 +1318,13 @@
           } else {
             rows.push(['Open', 'no position', 'today-muted']);
           }
-          rows.push(["Today's P&L", todayRs(s.total_rs) + ' (realized ' + todayRs(s.realized_rs) + ')',
-                     s.total_rs > 0 ? 'today-ok' : (s.total_rs < 0 ? 'today-bad' : 'today-muted')]);
-          rows.push(['Trades', String(s.trade_count || 0), 'today-muted']);
-          (s.trades || []).forEach(t => rows.push(['', t.time + ' ' + t.side + ' ' + Number(t.entry).toFixed(2) + ' → ' +
-            Number(t.exit).toFixed(2) + ' ' + todayRs(t.pnl_rs) + ' (' + t.reason + ')', t.pnl_rs >= 0 ? 'today-ok' : 'today-bad']));
-          if(s.stopped_by) rows.push(['Stopped by', s.stopped_by, 'today-muted']);
+          // P&L and trade count on one line; the trade list and stop reason fold under it.
+          const items = (s.trades || []).map(t => ['', t.time + ' ' + t.side + ' ' + Number(t.entry).toFixed(2) + ' → ' +
+            Number(t.exit).toFixed(2) + ' ' + todayRs(t.pnl_rs) + ' (' + t.reason + ')', t.pnl_rs >= 0 ? 'today-ok' : 'today-bad']);
+          if(s.stopped_by) items.push(['Stopped by', s.stopped_by, 'today-muted']);
+          rows.push({fold: 'trades-' + name, items,
+            summary: ["Today's P&L", todayRs(s.total_rs) + ' · Trades: ' + (s.trade_count || 0),
+                      s.total_rs > 0 ? 'today-ok' : (s.total_rs < 0 ? 'today-bad' : 'today-muted')]});
           cards.push(todayCard(name, rows));
         });
 
@@ -1317,13 +1341,17 @@
 
         const par = j.parity;
         if(par){
-          const rows = [['Trade date', par.trade_date || '-', 'today-muted']];
+          // One line per variant (verdict + issue count); the issues fold under it.
+          const rows = [];
           Object.entries(par.variants || {}).forEach(([v, r]) => {
             const [pLabel, pCls] = PARITY_LABELS[r.verdict] || [r.verdict, 'today-muted'];
-            rows.push([v, pLabel, pCls]);
-            (r.issues || []).slice(0, 3).forEach(issue => rows.push(['', issue, 'today-muted']));
+            const issues = r.issues || [];
+            rows.push({fold: 'parity-' + v, items: issues.map(issue => ['', issue, 'today-muted']),
+              summary: [v, pLabel + (issues.length ? ` (${issues.length} issue${issues.length === 1 ? '' : 's'})` : ''), pCls]});
           });
-          cards.push(todayCard('Paper vs backtest', rows));
+          let dateLabel = par.trade_date || '';
+          try { if(dateLabel) dateLabel = new Date(dateLabel + 'T00:00').toLocaleDateString(undefined, {day: 'numeric', month: 'short'}); } catch(e) {}
+          cards.push(todayCard('Paper vs backtest' + (dateLabel ? ' · ' + dateLabel : ''), rows));
         } else {
           cards.push(todayCard('Paper vs backtest', [['', 'No report yet', 'today-muted']]));
         }
