@@ -11,3 +11,9 @@ TRAILING_PROFIT_STAGE1 = [(25,15),(30,20),(35,25),(40,30),(45,35),(50,40),(55,45
 TRAILING_PROFIT_STAGE2 = list(TRAILING_PROFIT_STAGE1)
 
 ENTRY_SCORE_THRESHOLD = 4
+
+# Trailing ladder driven by the highest completed candle CLOSE, not the intra-minute high,
+# so a spike that reverses inside the minute does not lock a rung (12 Nov: +25 touched by
+# 0.10 on a wick, exited early). 27-day backtest 2026-10-05..11-12: +22,289 -> +33,862,
+# same max drawdown; v28 (coarser ladder) was worse with it, so v28 keeps highs.
+TRAIL_ON_CLOSE = True

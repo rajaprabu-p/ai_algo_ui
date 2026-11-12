@@ -9,3 +9,6 @@ TRAILING_PROFIT_STAGE2 = [(25,20),(30,25),(40,35),(50,45),(60,55),(70,65),(80,75
 # TRAILING_PROFIT_STAGE2 = TRAILING_PROFIT_STAGE1
 
 ENTRY_SCORE_THRESHOLD = 5
+
+# Trailing ladder driven by intra-minute highs (tested on closes: worse for v28's coarse ladder).
+TRAIL_ON_CLOSE = False

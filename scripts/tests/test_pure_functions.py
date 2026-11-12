@@ -69,6 +69,7 @@ class VariantSettingsTests(unittest.TestCase):
         self.assertEqual(m.TRAILING_PROFIT_STAGE1[0], (30, 10))
         self.assertEqual(m.TRAILING_PROFIT_STAGE2[0], (25, 20))
         self.assertIsNot(m.TRAILING_PROFIT_STAGE1, m.TRAILING_PROFIT_STAGE2)
+        self.assertFalse(m.TRAIL_ON_CLOSE)   # v28 trails on intra-minute highs
 
     def test_v30(self):
         m = MODULES["v30"]
@@ -81,9 +82,11 @@ class VariantSettingsTests(unittest.TestCase):
         self.assertIsNot(m.TRAILING_PROFIT_STAGE1, m.TRAILING_PROFIT_STAGE2)
         self.assertEqual(m.get_trailing_profit_status(26.0, "10:00"), "S1:1:25->15")
         self.assertEqual(m.get_trailing_profit_status(26.0, "10:45"), "S2:1:25->15")
+        self.assertTrue(m.TRAIL_ON_CLOSE)    # v30 trails on completed candle closes
 
     def test_shared_settings_identical(self):
-        differing = {"LOG_IDENTIFIER", "ENTRY_SCORE_THRESHOLD", "TRAILING_PROFIT_STAGE1", "TRAILING_PROFIT_STAGE2", "_VARIANT", "_cli"}
+        differing = {"LOG_IDENTIFIER", "ENTRY_SCORE_THRESHOLD", "TRAILING_PROFIT_STAGE1", "TRAILING_PROFIT_STAGE2",
+                     "TRAIL_ON_CLOSE", "_VARIANT", "_cli"}
         a, b = vars(MODULES["v28"]), vars(MODULES["v30"])
         for key in sorted(set(a) - differing):
             value = a[key]
@@ -586,6 +589,29 @@ class LiveGapContextTests(StrategyTestCase):
             self.assertEqual(ctx["gap_type"], "GAP_DOWN")
             self.assertAlmostEqual(ctx["gap_points"], -41.05, places=2)
             self.assertNotEqual(ctx["cpr_type"], "")
+
+
+class TrailOnCloseLiveTests(StrategyTestCase):
+    """Live/paper trailing peak input for TRAIL_ON_CLOSE: newest completed candle close of the position's strike."""
+
+    def test_last_completed_option_close(self):
+        state = {"current_pe_symbol": "NIFTY26N1725350PE", "pe_rows": [{"close": 212.35}, {"close": 215.25}],
+                 "current_ce_symbol": "NIFTY26N1725350CE", "ce_rows": []}
+        for m in self.each_module():
+            self.assertEqual(m.last_completed_option_close(state, "PE", "NIFTY26N1725350PE"), 215.25)
+            self.assertEqual(m.last_completed_option_close(state, "PE"), 215.25)
+            # rows of another strike, no rows, or a bad side -> 0 (the stop is not raised)
+            self.assertEqual(m.last_completed_option_close(state, "PE", "NIFTY26N1725300PE"), 0.0)
+            self.assertEqual(m.last_completed_option_close(state, "CE", "NIFTY26N1725350CE"), 0.0)
+            self.assertEqual(m.last_completed_option_close(state, "XX"), 0.0)
+
+    def test_a_wick_does_not_arm_a_rung_on_closes(self):
+        # 12 Nov: entry 198.70, a wick to 223.80 (+25.1) inside a candle that closed at 212.35 (+13.65).
+        m = MODULES["v30"]
+        on_high = m.get_trailing_stop_for_profit(198.70, 223.80 - 198.70, 173.70, current_time="11:10")
+        on_close = m.get_trailing_stop_for_profit(198.70, 212.35 - 198.70, 173.70, current_time="11:10")
+        self.assertGreater(on_high, 173.70)   # the high arms +25 -> lock
+        self.assertEqual(on_close, 173.70)    # the close does not
 
 
 class GiftNiftyTests(StrategyTestCase):

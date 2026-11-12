@@ -4,6 +4,8 @@
     TRAILING_PROFIT_STAGE1   [(profit_points, lock_points), ...] before TRAILING_PROFIT_STAGE2_TIME
     TRAILING_PROFIT_STAGE2   ladder from TRAILING_PROFIT_STAGE2_TIME onwards
     ENTRY_SCORE_THRESHOLD    minimum entry score for a CE/PE buy
+    TRAIL_ON_CLOSE           optional (default False): drive the trailing ladder from the highest
+                             completed candle close instead of the intra-minute high
 
 To add a variant: copy v28.py to vNN.py, change the values, and add a
 scripts/vNN_strategy_main.py launcher (and allow it in app.py's STRATEGY_SCRIPTS).

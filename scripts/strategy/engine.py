@@ -207,6 +207,9 @@ ENABLE_TRAILING_PROFIT_EXIT = True  # Enable trailing profit after first 50-poin
 TRAILING_PROFIT_STAGE1 = _VARIANT.TRAILING_PROFIT_STAGE1
 TRAILING_PROFIT_STAGE2 = _VARIANT.TRAILING_PROFIT_STAGE2
 TRAILING_PROFIT_STAGE2_TIME = "10:30"  # HH:MM (IST); at or after this time, switch to TRAILING_PROFIT_STAGE2
+# Per variant: True = the trailing ladder's peak is the highest completed candle close (a spike
+# that reverses inside the minute cannot lock a rung); False = intra-minute highs / live ticks.
+TRAIL_ON_CLOSE = bool(getattr(_VARIANT, "TRAIL_ON_CLOSE", False))
 ENABLE_MFE_EXIT = bool(EDITABLE_CONFIG["ENABLE_MFE_EXIT"])
 MFE_MIN_POINTS = 10.0
 MFE_EXIT_AFTER_MINUTES = 10
@@ -2016,6 +2019,22 @@ def option_round_trip_charges(entry_price: float, exit_price: float, qty: int) -
     parts = {k: round(v, 2) for k, v in parts.items()}
     parts["total"] = round(sum(parts.values()), 2)
     return parts
+
+
+def last_completed_option_close(live_state: dict, side: str, option_symbol: str = "") -> float:
+    """Close of the newest completed 1-minute candle of the CE/PE leg being tracked live.
+
+    Used as the trailing peak input when TRAIL_ON_CLOSE is on. Returns 0.0 when unknown or
+    when the live candle rows belong to a different strike than the position (no raise then).
+    """
+    side = str(side or "").upper()
+    if side not in {"CE", "PE"}:
+        return 0.0
+    tracked = str(live_state.get("current_ce_symbol" if side == "CE" else "current_pe_symbol") or "")
+    if option_symbol and tracked and str(option_symbol) != tracked:
+        return 0.0
+    rows = live_state.get("ce_rows" if side == "CE" else "pe_rows") or []
+    return safe_float(rows[-1].get("close"), 0.0) if rows else 0.0
 
 
 def ensure_trade_charges(trade: dict) -> dict:
@@ -4161,10 +4180,21 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         prev_best_price = entry_price_actual
                     synced["best_price"] = max(prev_best_price, option_ltp)
                     trail_now = datetime.now(IST)
-                    synced["best_price_stage2"] = update_stage2_peak(synced.get("best_price_stage2"), option_ltp, trail_now)
+                    # Trailing peak input: the live price, or (TRAIL_ON_CLOSE) the newest completed
+                    # candle close of this option, same as the backtest and paper trading.
+                    if TRAIL_ON_CLOSE:
+                        trail_px = last_completed_option_close(live_state, side, option_symbol)
+                        synced["trail_best_price"] = max(
+                            safe_float(synced.get("trail_best_price"), entry_price_actual), entry_price_actual, trail_px)
+                        trail_best = synced["trail_best_price"]
+                    else:
+                        trail_px = option_ltp
+                        trail_best = synced["best_price"]
+                    if trail_px > 0:
+                        synced["best_price_stage2"] = update_stage2_peak(synced.get("best_price_stage2"), trail_px, trail_now)
                     pnl_points_live = option_ltp - entry_price_actual
                     pnl_points_high = get_trailing_peak_points(
-                        entry_price_actual, synced["best_price"], synced["best_price_stage2"], trail_now
+                        entry_price_actual, trail_best, synced.get("best_price_stage2"), trail_now
                     )
                     synced["live_pnl_points"] = pnl_points_live
                     synced["live_pnl_points_high"] = synced["best_price"] - entry_price_actual
@@ -5571,15 +5601,25 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
         # which is a genuine bug: the day-driven path and live broker orders
         # both lock in stages based on the peak, not the latest tick.
         current_time = live_state.get("last_tick_exchange_ts") or datetime.now(IST)
-        stage2_peak = update_stage2_peak(
-            max(
-                safe_float(open_position.get("best_price_stage2"), 0.0),
-                safe_float(persisted_open_position.get("best_price_stage2"), 0.0),
-            ),
-            option_ltp,
-            current_time,
+        # Trailing peak input: the live tick, or (TRAIL_ON_CLOSE) the newest completed candle
+        # close, so a spike that reverses inside the minute cannot lock a rung.
+        if TRAIL_ON_CLOSE:
+            trail_px = last_completed_option_close(live_state, side, str(open_position.get("option_symbol") or ""))
+            trail_best = max(
+                entry_price,
+                safe_float(open_position.get("trail_best_price"), entry_price),
+                safe_float(persisted_open_position.get("trail_best_price"), entry_price),
+                trail_px,
+            )
+        else:
+            trail_px = option_ltp
+            trail_best = best_price
+        prev_stage2 = max(
+            safe_float(open_position.get("best_price_stage2"), 0.0),
+            safe_float(persisted_open_position.get("best_price_stage2"), 0.0),
         )
-        pnl_points_high = get_trailing_peak_points(entry_price, best_price, stage2_peak, current_time)
+        stage2_peak = update_stage2_peak(prev_stage2, trail_px if trail_px > 0 else prev_stage2, current_time)
+        pnl_points_high = get_trailing_peak_points(entry_price, trail_best, stage2_peak, current_time)
         current_stop = safe_float(
             open_position.get("trailing_stop_price"),
             0.0,
@@ -5613,6 +5653,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             "best_price": round(best_price, 2),
             "high_during_trade": round(best_price, 2),
             "best_price_stage2": round(stage2_peak, 2) if stage2_peak is not None else None,
+            "trail_best_price": round(trail_best, 2),
             "trailing_stop_price": safe_float(trailing_stop, 0.0),
             "trailing_stop_active": bool(
                 safe_float(trailing_stop, 0.0)
@@ -6550,6 +6591,8 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
     emergency_sl_pct_used = float(FIXED_SL_POINTS)
     best_price = None
     stage2_peak = None
+    trail_best_price = None   # TRAIL_ON_CLOSE: highest candle close of the open trade (stage-1 peak)
+    trail_best_entry_ts = None
     entry_reason = None
     trade_count = 0
     realized_mtm_rs = previous_realized_mtm
@@ -6996,7 +7039,13 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
             option_high = max(option_high, ltp)
             option_low = min(option_low, ltp)
             best_price = max(best_price, ltp, option_high)
-            stage2_peak = update_stage2_peak(stage2_peak, max(ltp, option_high), ts)
+            # The trailing ladder's peak: candle closes (TRAIL_ON_CLOSE) or intra-minute highs.
+            # best_price stays the true high (reports, MFE exit).
+            trail_price = ltp if TRAIL_ON_CLOSE else max(ltp, option_high)
+            if trail_best_entry_ts != entry_ts or trail_best_price is None:
+                trail_best_price, trail_best_entry_ts = entry_price, entry_ts
+            trail_best_price = max(trail_best_price, trail_price)
+            stage2_peak = update_stage2_peak(stage2_peak, trail_price, ts)
             option_open = safe_float(row.get("ce_open") if side == "CE" else row.get("pe_open"), ltp)
             pnl_pct = (ltp - entry_price) / entry_price
             open_pnl_rs = (ltp - entry_price) * QTY
@@ -7005,7 +7054,8 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
 
             pnl_points_current = ltp - entry_price
             pnl_points_high = best_price - entry_price
-            trailing_peak_points = get_trailing_peak_points(entry_price, best_price, stage2_peak, ts)
+            trailing_peak_points = get_trailing_peak_points(
+                entry_price, trail_best_price if TRAIL_ON_CLOSE else best_price, stage2_peak, ts)
             sl_before_candle = safe_float(sl, 0.0)
             trailing_active_before_candle = trailing_stop_active
             trade_age = ts - entry_ts if entry_ts is not None else timedelta(0)
@@ -7259,6 +7309,7 @@ def run_single_day_test(day: pd.DataFrame, run_mode: str, previous_realized_mtm:
             "best_price": round(float(best_price), 2) if best_price is not None else round(float(entry_price), 2),
             "high_during_trade": round(float(best_price), 2) if best_price is not None else round(float(entry_price), 2),
             "best_price_stage2": round(float(stage2_peak), 2) if stage2_peak is not None else None,
+            "trail_best_price": round(float(trail_best_price), 2) if trail_best_price is not None else None,
             "qty": QTY,
             "mtf_entry_label": entry_label,
             "gap_type": market_ctx.get("gap_type", ""),
