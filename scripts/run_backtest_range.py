@@ -67,29 +67,44 @@ def main():
           f"{dates[0].isoformat()} to {dates[-1].isoformat()}\n")
 
     failed = []
+    day_results = []   # (date, trades, net_rs) for the summary block at the end
     for i, d in enumerate(dates, 1):
         ds = d.isoformat()
         print(f"{'='*60}")
-        print(f"[{i}/{len(dates)}] Running: {ds}")
-        print(f"{'='*60}")
+        print(f"[{i}/{len(dates)}] Running: {ds}", flush=True)
+        print(f"{'='*60}", flush=True)
         child_env = os.environ.copy()
-        result = subprocess.run(
+        child_env.setdefault("PYTHONIOENCODING", "utf-8")
+        # Pass the day's output through unchanged (same log as before) and note its
+        # trade count and net P&L for the range summary.
+        proc = subprocess.Popen(
             [
-                sys.executable,
+                sys.executable, "-u",
                 args.strategy,
-                "--date",
-                ds,
-                "--mode",
-                args.mode,
-                "--option-data-source",
-                args.option_data_source,
+                "--date", ds,
+                "--mode", args.mode,
+                "--option-data-source", args.option_data_source,
             ],
-            cwd=".",
-            env=child_env,
+            cwd=".", env=child_env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
-        if result.returncode != 0:
-            print(f"[WARNING] Script exited with code {result.returncode} for {ds}")
+        trades, net = 0, None
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            parsed = parse_day_line(line)
+            if parsed:
+                key, value = parsed
+                if key == "trades":
+                    trades = int(value)
+                else:
+                    net = value
+        returncode = proc.wait()
+        if returncode != 0:
+            print(f"[WARNING] Script exited with code {returncode} for {ds}")
             failed.append(ds)
+        else:
+            day_results.append((ds, trades, 0.0 if net is None else net))
         print()
 
     print(f"{'='*60}")
@@ -98,6 +113,32 @@ def main():
         print(f"[FAILED] {len(failed)} date(s) had errors: {', '.join(failed)}")
     else:
         print("[OK] All dates ran successfully.")
+    print_range_summary(day_results, len(dates))
+
+
+def parse_day_line(line: str):
+    """('trades', n) or ('net', rupees) from a day's result block, else None."""
+    text = line.strip()
+    for prefix, key in (("Total trades", "trades"), ("Net P&L (Rs)", "net")):
+        if text.startswith(prefix) and ":" in text:
+            try:
+                value = float(text.split(":", 1)[1].strip().split()[0])
+            except (ValueError, IndexError):
+                return None
+            return key, (int(value) if key == "trades" else value)
+    return None
+
+
+def print_range_summary(day_results, total_days: int) -> None:
+    """Range totals at the very end of the log, so the dashboard reads them from the log tail."""
+    net = round(sum(r[2] for r in day_results), 2)
+    trades = sum(r[1] for r in day_results)
+    print(f"{'='*60}")
+    for ds, n, rs in day_results:
+        print(f"[RANGE DAY] {ds} trades={n} net_rs={rs:.2f}")
+    print(f"[RANGE SUMMARY] days={len(day_results)}/{total_days} trades={trades} net_rs={net:.2f} "
+          f"winning_days={sum(1 for r in day_results if r[2] > 0)} losing_days={sum(1 for r in day_results if r[2] < 0)}",
+          flush=True)
 
 
 if __name__ == "__main__":

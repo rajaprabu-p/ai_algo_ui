@@ -1497,6 +1497,11 @@
           }
           else if(/^\[DONE\] Completed \d+ runs/.test(l)){ closeDay(); s.rangeDate = ''; s.rangeDone = true; }
           else if((m = l.match(/^\[FAILED\] \d+ date\(s\) had errors: (.+)$/))) s.rangeFailed = m[1];
+          // The range runner's own totals (always in the log tail, unlike the early days' blocks).
+          else if((m = l.match(/^\[RANGE SUMMARY\] days=(\d+)\/(\d+) trades=(\d+) net_rs=([-\d.]+)(?: winning_days=(\d+) losing_days=(\d+))?/))){
+            s.rangeSummary = {days: +m[1], total: +m[2], trades: +m[3], net: +m[4], win: m[5] === undefined ? null : +m[5], lose: m[6] === undefined ? null : +m[6]};
+            s.rangeDone = true; s.rangeTotal = s.rangeTotal || m[2];
+          }
           else if((m = l.match(/^Running mode:\s*(\S+)/))) s.mode = m[1];
           else if((m = l.match(/^\[RUN BANNER\].*?trade_date=(\S+)/))) s.tradeDate = m[1];
           else if((m = l.match(/^Waiting for market open at (\S+) IST.*remaining~(\d+)m/))){ s.phase = 'wait_open'; s.waitAt = m[1].slice(0, 5); s.waitMin = m[2]; }
@@ -1548,7 +1553,7 @@
         let phase;
         if(s.open && !running && !isBacktest) phase = 'process NOT running but the log shows an open trade, check positions in Kite';
         else if(s.error) phase = 'ERROR, see the log below';
-        else if(s.rangeTotal && (s.rangeDone || !running)) phase = `backtest range finished (${s.rangeDays}/${s.rangeTotal} days)` + (s.rangeFailed ? `, failed: ${s.rangeFailed}` : '');
+        else if(s.rangeTotal && (s.rangeDone || !running)) phase = `backtest range finished (${s.rangeSummary ? s.rangeSummary.days : s.rangeDays}/${s.rangeTotal} days)` + (s.rangeFailed ? `, failed: ${s.rangeFailed}` : '');
         else if(inRange) phase = `backtesting day ${s.rangeStep} (${s.rangeDate})` + (s.open ? ', in a trade' : '');
         else if(s.open) phase = isBacktest ? 'backtest in a trade' : 'in a trade';
         else if(s.ended || !running){
@@ -1565,8 +1570,17 @@
 
         // Finished range: totals for the whole range.
         if(s.rangeTotal && (s.rangeDone || !running)){
-          lines.push(`Range P&L: ${todayRs(s.rangePnl)} over ${s.rangeDays} day(s)`);
-          lines.push(`Trades: ${s.rangeTrades}`);
+          const rs = s.rangeSummary;
+          if(rs){
+            lines.push(`Range P&L: ${todayRs(rs.net)} over ${rs.days} day(s)` +
+                       (rs.win !== null ? ` · ${rs.win} winning / ${rs.lose} losing day(s)` : ''));
+            lines.push(`Trades: ${rs.trades}`);
+          } else {
+            // Older logs without the runner's summary: only the days still in the log tail are counted.
+            lines.push(`Range P&L: ${todayRs(s.rangePnl)} over the last ${s.rangeDays} day(s) shown in the log` +
+                       (s.rangeDays < +s.rangeTotal ? ' (see the Performance page for the full range)' : ''));
+            lines.push(`Trades: ${s.rangeTrades}`);
+          }
           element.textContent = lines.join('\n');
           element.dataset.state = s.error || s.rangeFailed ? 'error' : 'stopped';
           return;
