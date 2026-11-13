@@ -168,6 +168,30 @@ class TodayEndpointTests(unittest.TestCase):
             self.assertIn(key, j)
         self.assertEqual(set(j["strategies"]), {"v28", "v30"})
 
+    def test_session_health(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            def log(name):
+                with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                    f.write("x")
+            log("papertrade_09112026_084734_v28.txt")
+            log("papertrade_09112026_112806_v28.txt")      # restart after 09:20
+            log("papertrade_09112026_084736_v30.txt")
+            log("papertrade_08112026_101500_v30.txt")      # other day
+            h = webapp.today_session_health(tmp, "v28", "2026-11-09", True, "12:00")
+            self.assertEqual((h["starts"], h["late"], h["restarted"], h["stopped_at"]),
+                             (["08:47", "11:28"], ["11:28"], True, ""))
+            ok = webapp.today_session_health(tmp, "v30", "2026-11-09", True, "12:00")
+            self.assertEqual((ok["late"], ok["restarted"], ok["stopped_at"]), ([], False, ""))
+            # not running during market hours -> stopped; after the close it is normal
+            self.assertRegex(webapp.today_session_health(tmp, "v30", "2026-11-09", False, "12:00")["stopped_at"], r"^\d\d:\d\d$")
+            self.assertEqual(webapp.today_session_health(tmp, "v30", "2026-11-09", False, "15:45")["stopped_at"], "")
+            # no session today -> nothing to warn about
+            self.assertEqual(webapp.today_session_health(tmp, "v28", "2026-11-10", False, "12:00"),
+                             {"starts": [], "late": [], "restarted": False, "stopped_at": ""})
+            late = webapp.today_session_health(tmp, "v30", "2026-11-08", True, "12:00")
+            self.assertEqual((late["late"], late["restarted"]), (["10:15"], False))   # one late start
+
     def test_parity_run_endpoint(self):
         import json
         import tempfile

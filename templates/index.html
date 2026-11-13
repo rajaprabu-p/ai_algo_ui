@@ -1380,6 +1380,14 @@
                          s.running ? 'today-ok' : 'today-muted']];
           // The panel log now holds a backtest; paper results below come from today's paper Excel.
           if(!s.running && s.log_mode === 'BACKTEST') rows[0][1] += ' · last panel run: backtest';
+          // Session warnings: stopped during market hours, or started late / restarted after 09:20
+          // (paper may then miss trades the backtest takes).
+          const ses = s.session;
+          if(ses && ses.stopped_at) rows.push(['Session', 'stopped during market hours (last log ' + ses.stopped_at + ')', 'today-warn']);
+          if(ses && ses.late && ses.late.length){
+            rows.push(['Session', (ses.restarted ? 'restarted at ' : 'started late at ') + ses.late.join(', ') +
+              (ses.starts.length > 1 ? ' (sessions ' + ses.starts.join(', ') + ')' : ''), 'today-warn']);
+          }
           const p = s.open_position;
           if(p){
             let text = p.side + ' ' + p.symbol + ' @ ' + Number(p.entry).toFixed(2);

@@ -1913,6 +1913,36 @@ def today_backtest_summary(log_dir: str, variant: str, today: str):
             "settings": info["settings"], "run_at": datetime.fromtimestamp(newest_mtime, IST).strftime("%H:%M")}
 
 
+def today_session_health(log_dir: str, variant: str, today: str, running: bool, now_hhmm: str) -> dict:
+    """Paper/live session warnings for a Today card, from today's run log names (one per start).
+
+    late: a session started after PAPER_LATE_START_AFTER (09:20) - a late start or a
+    restart during the day, so the paper results may miss trades the backtest takes.
+    stopped_at: during market hours (09:15-15:30) no session is running although one
+    ran today; the time is the newest run log's last write.
+    """
+    starts, newest_path = [], None
+    try:
+        names = os.listdir(log_dir)
+    except OSError:
+        names = []
+    y, m, d = today.split("-")
+    for name in names:
+        match = _SESSION_LOG_RE.match(name)
+        if not match or match["variant"] != variant or (match["y"], match["m"], match["d"]) != (y, m, d):
+            continue
+        starts.append(f"{match['H']}:{match['M']}")
+        path = os.path.join(log_dir, name)
+        if newest_path is None or os.path.getmtime(path) > os.path.getmtime(newest_path):
+            newest_path = path
+    starts.sort()
+    late = [t for t in starts if t > PAPER_LATE_START_AFTER]
+    stopped_at = ""
+    if starts and not running and "09:15" <= now_hhmm < "15:30" and newest_path:
+        stopped_at = datetime.fromtimestamp(os.path.getmtime(newest_path), IST).strftime("%H:%M")
+    return {"starts": starts, "late": late, "restarted": bool(late) and len(starts) > 1, "stopped_at": stopped_at}
+
+
 def merge_today_paper_excel(summary: dict, excel_trades: list) -> dict:
     """Use the paper Excel trades for the Today card's closed trades (the log may hold a backtest run).
 
@@ -2057,6 +2087,11 @@ def api_today():
             strategies[name]["backtest"] = today_backtest_summary(LOGS_DIR, name, today)
         except Exception:
             strategies[name]["backtest"] = None
+        try:
+            strategies[name]["session"] = today_session_health(
+                LOGS_DIR, name, today, running, datetime.now(IST).strftime("%H:%M"))
+        except Exception:
+            strategies[name]["session"] = None
 
     markers = {}
     for name in TODAY_STRATEGIES:
