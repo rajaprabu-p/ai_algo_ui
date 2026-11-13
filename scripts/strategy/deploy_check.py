@@ -12,6 +12,10 @@ needs. At startup the engine compares the files on disk with it:
 
 Fingerprints ignore line endings, because FileZilla uploads .py files in ASCII
 mode and converts Windows (CRLF) line endings to Linux (LF) ones.
+
+The manifest also fingerprints the dashboard files ("app_files": app.py,
+templates/, the top-level scripts). The engine ignores them; the dashboard
+footer shows the version and whether those files match (check_app).
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 MANIFEST_PATH = PACKAGE_DIR / MANIFEST_NAME
 # Files outside the strategy/ package that the engine needs (relative to scripts/).
 EXTRA_FILES = ("v28_strategy_main.py", "v30_strategy_main.py", "editable_config.py")
+PROJECT_DIR = SCRIPTS_DIR.parent
 BLOCKING_MODES = {"LIVE_ORDER"}
 EXIT_CODE_BLOCKED = 4
 
@@ -48,6 +53,23 @@ def tracked_files(scripts_dir: Path = SCRIPTS_DIR) -> list[str]:
         if "__pycache__" not in p.parts
     ]
     files += [name for name in EXTRA_FILES if (scripts_dir / name).exists()]
+    return sorted(set(files))
+
+
+def app_tracked_files(project_dir: Path = PROJECT_DIR) -> list[str]:
+    """Dashboard files (POSIX paths relative to the project): app.py, templates, top-level scripts.
+
+    Strategy files are in the "files" section already; tests and data are left out.
+    """
+    files = ["app.py"] if (project_dir / "app.py").exists() else []
+    templates = project_dir / "templates"
+    if templates.is_dir():
+        files += [p.relative_to(project_dir).as_posix() for p in templates.glob("*.html")]
+    scripts = project_dir / "scripts"
+    if scripts.is_dir():
+        files += [p.relative_to(project_dir).as_posix() for p in scripts.glob("*.py") if p.name not in EXTRA_FILES]
+        if (scripts / "market_holidays.txt").exists():
+            files.append("scripts/market_holidays.txt")
     return sorted(set(files))
 
 
@@ -70,6 +92,7 @@ def build_manifest(scripts_dir: Path = SCRIPTS_DIR, version: str | None = None) 
         "version": version or f"{stamp}_{_git_version(scripts_dir)}",
         "created": datetime.now().isoformat(timespec="seconds"),
         "files": {rel: fingerprint(scripts_dir / rel) for rel in tracked_files(scripts_dir)},
+        "app_files": {rel: fingerprint(scripts_dir.parent / rel) for rel in app_tracked_files(scripts_dir.parent)},
     }
 
 
@@ -120,6 +143,32 @@ def check(scripts_dir: Path = SCRIPTS_DIR) -> CheckResult:
             result.changed.append(rel)
         result.checked += 1
     result.extra = [rel for rel in tracked_files(scripts_dir) if rel not in expected]
+    return result
+
+
+def check_app(scripts_dir: Path = SCRIPTS_DIR) -> CheckResult:
+    """Compare the dashboard files with the manifest's "app_files" (the engine does not use this)."""
+    path = scripts_dir / "strategy" / MANIFEST_NAME
+    project_dir = scripts_dir.parent
+    if not path.exists():
+        return CheckResult(error=f"no {MANIFEST_NAME} (run scripts/make_manifest.py)")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return CheckResult(error=f"cannot read {path}: {exc}")
+    result = CheckResult(version=str(manifest.get("version", "?")))
+    if "app_files" not in manifest:
+        result.error = "manifest has no dashboard files (made by an older make_manifest.py; run it again)"
+        return result
+    expected = dict(manifest["app_files"])
+    for rel, digest in sorted(expected.items()):
+        target = project_dir / rel
+        if not target.exists():
+            result.missing.append(rel)
+        elif fingerprint(target) != digest:
+            result.changed.append(rel)
+        result.checked += 1
+    result.extra = [rel for rel in app_tracked_files(project_dir) if rel not in expected]
     return result
 
 

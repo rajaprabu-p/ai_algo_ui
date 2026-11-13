@@ -676,6 +676,50 @@ def stop_named_strategy(name: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _load_deploy_check():
+    """scripts/strategy/deploy_check.py, loaded by path (no strategy package import)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ai_algo_deploy_check", os.path.join(SCRIPTS_DIR, "strategy", "deploy_check.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module   # dataclasses look the module up while it loads
+    spec.loader.exec_module(module)
+    return module
+
+
+try:
+    _deploy_check = _load_deploy_check()
+    _APP_FINGERPRINT_AT_START = _deploy_check.fingerprint(__import__("pathlib").Path(os.path.abspath(__file__)))
+except Exception:
+    _deploy_check, _APP_FINGERPRINT_AT_START = None, ""
+
+
+def deploy_status() -> dict:
+    """Version from MANIFEST.json and whether the strategy + dashboard files on disk match it.
+
+    Shown in the page footer so the server and this PC can be compared at a glance.
+    restart_needed: app.py on disk differs from the code this Flask process started with.
+    """
+    if _deploy_check is None:
+        return {"version": "unknown", "ok": False, "files": 0, "problems": ["deploy_check.py could not be loaded"],
+                "more_problems": 0, "restart_needed": False}
+    from pathlib import Path
+    strategy = _deploy_check.check(Path(SCRIPTS_DIR))
+    dashboard = _deploy_check.check_app(Path(SCRIPTS_DIR))
+    problems = strategy.problems() + [p for p in dashboard.problems() if p not in strategy.problems()]
+    try:
+        restart_needed = _deploy_check.fingerprint(Path(os.path.abspath(__file__))) != _APP_FINGERPRINT_AT_START
+    except Exception:
+        restart_needed = False
+    return {"version": strategy.version or dashboard.version or "unknown", "ok": not problems,
+            "files": strategy.checked + dashboard.checked, "problems": problems[:8],
+            "more_problems": max(0, len(problems) - 8), "restart_needed": restart_needed}
+
+
+@app.route("/api/version")
+def api_version():
+    return jsonify({"ok": True, **deploy_status()})
+
+
 @app.route("/")
 def index():
     if not session.get("logged_in"):
@@ -686,6 +730,7 @@ def index():
         server_time=ist_now_str(),
         server_time_epoch=time.time(),
         market_holidays=load_market_holidays(),
+        deploy=deploy_status(),
     )
 
 
@@ -2255,7 +2300,7 @@ def session_starts(log_dir: str, source: str, variant: str) -> dict:
 
 @app.route("/performance")
 def performance_page():
-    return render_template("performance.html")
+    return render_template("performance.html", deploy=deploy_status())
 
 
 def performance_groups(log_dir: str) -> list:

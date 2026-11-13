@@ -24,23 +24,25 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.check:
-        result = deploy_check.check()
-        if result.ok:
-            print(f"OK: version={result.version}, {result.checked} files match")
+        result, app = deploy_check.check(), deploy_check.check_app()
+        if result.ok and app.ok:
+            print(f"OK: version={result.version}, {result.checked} strategy + {app.checked} dashboard files match")
             return 0
         print(f"Manifest problems (version={result.version or 'unknown'}):")
-        for line in result.problems():
+        for line in result.problems() + app.problems():
             print(f"  - {line}")
         return 1
 
     path, manifest = deploy_check.write_manifest()
     print(f"Wrote {path}")
-    print(f"version={manifest['version']}  files={len(manifest['files'])}")
+    print(f"version={manifest['version']}  strategy files={len(manifest['files'])}  dashboard files={len(manifest['app_files'])}")
     for rel in manifest["files"]:
         print(f"  {rel}")
+    print("  (dashboard: " + ", ".join(manifest["app_files"]) + ")")
     if manifest["version"].endswith("-dirty"):
         print("Note: you have uncommitted changes; consider committing before deploying.")
     print("\nUpload with FileZilla: the whole scripts/strategy/ folder, plus any changed files listed outside it.")
+    print("The dashboard footer shows this version and whether every file on the server matches it.")
     return 0
 
 

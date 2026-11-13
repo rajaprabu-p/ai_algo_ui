@@ -384,6 +384,9 @@
         .pnl-table { font-size: 0.85rem; }
         .pnl-summary { gap: 0.4rem; }
       }
+      .deploy-footer { margin: 1.2rem 0 0.4rem; text-align: center; font-size: 0.78rem; color: #64748b; word-break: break-word; }
+      .deploy-footer .deploy-ok { color: #15803d; }
+      .deploy-footer .deploy-bad { color: #b91c1c; font-weight: 600; }
     </style>
   </head>
   <body>
@@ -2919,5 +2922,11 @@
       updateServerTime();
       setInterval(updateServerTime, 1000);
     </script>
+    <footer class="deploy-footer" title="{% for p in deploy.problems %}{{ p }}&#10;{% endfor %}">
+    Version <strong>{{ deploy.version }}</strong> ·
+    {% if deploy.ok %}<span class="deploy-ok">all {{ deploy.files }} files match</span>
+    {% else %}<span class="deploy-bad">{{ deploy.problems|length + deploy.more_problems }} file problem(s): {{ deploy.problems[:3]|join('; ') }}{% if deploy.problems|length > 3 or deploy.more_problems %} …{% endif %}</span>{% endif %}
+    {% if deploy.restart_needed %} · <span class="deploy-bad">app.py changed since Flask started: restart Flask</span>{% endif %}
+  </footer>
   </body>
 </html>

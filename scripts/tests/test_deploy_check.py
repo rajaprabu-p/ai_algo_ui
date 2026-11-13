@@ -53,6 +53,33 @@ class DeployCheckTests(unittest.TestCase):
             "strategy/variants/v28.py", "v28_strategy_main.py",
         ])  # editable_config.json is UI state on the server, never fingerprinted
 
+    def test_dashboard_files_in_their_own_section(self):
+        (self.tmp / "templates").mkdir()
+        (self.tmp / "app.py").write_text("app = 1\n", encoding="utf-8", newline="\r\n")
+        (self.tmp / "templates" / "index.html").write_text("<html>\n", encoding="utf-8")
+        (self.scripts / "paper_vs_backtest.py").write_text("x = 1\n", encoding="utf-8")
+        _, manifest = deploy_check.write_manifest(self.scripts, version="test-2")
+        self.assertEqual(sorted(manifest["app_files"]), ["app.py", "scripts/paper_vs_backtest.py", "templates/index.html"])
+        self.assertNotIn("app.py", manifest["files"])
+        app = deploy_check.check_app(self.scripts)
+        self.assertTrue(app.ok, app.problems())
+        self.assertEqual((app.version, app.checked), ("test-2", 3))
+        # FileZilla line endings still match; a changed template does not
+        (self.tmp / "app.py").write_bytes(b"app = 1\n")
+        (self.tmp / "templates" / "index.html").write_text("<html>new\n", encoding="utf-8")
+        app = deploy_check.check_app(self.scripts)
+        self.assertEqual(app.changed, ["templates/index.html"])
+        # a dashboard file never blocks LIVE_ORDER: the engine checks "files" only
+        self.assertTrue(deploy_check.check(self.scripts).ok)
+
+    def test_old_manifest_without_dashboard_files(self):
+        import json
+        path = self.scripts / "strategy" / "MANIFEST.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest.pop("app_files")
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertIn("older make_manifest.py", deploy_check.check_app(self.scripts).error)
+
     def test_all_files_match(self):
         result = deploy_check.check(self.scripts)
         self.assertTrue(result.ok, result.problems())
