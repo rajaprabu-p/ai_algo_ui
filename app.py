@@ -2118,16 +2118,23 @@ def _read_result_file(path: str, source: str) -> dict:
     return out
 
 
-def compute_performance(days: list) -> dict:
+def has_net_pnl(days: list) -> bool:
+    """True when every trade of these days has net P&L (after charges)."""
+    trades = [t for d in days for t in d["trades"]]
+    return bool(trades) and all(t.get("net_pnl_rs") is not None for t in trades)
+
+
+def compute_performance(days: list, basis: str = "") -> dict:
     """KPIs, equity curve, drawdown and breakdowns from per-day trade lists (pure function).
 
     `days`: [{"date", "trades": [...], "gap_type", "cpr_type"}]. Uses net P&L (after
     charges) only when every trade has it; otherwise everything is gross, so the
-    numbers are never a mix of the two.
+    numbers are never a mix of the two. basis="gross" forces gross (to compare with
+    a source that has no charges).
     """
     days = sorted(days, key=lambda d: d["date"])
     all_trades = [t for d in days for t in d["trades"]]
-    basis = "net" if all_trades and all(t.get("net_pnl_rs") is not None for t in all_trades) else "gross"
+    basis = "net" if basis != "gross" and has_net_pnl(days) else "gross"
     key = "net_pnl_rs" if basis == "net" else "pnl_rs"
 
     daily, equity, peak, max_dd = [], 0.0, 0.0, 0.0
@@ -2215,7 +2222,35 @@ def collect_performance_days(log_dir: str, source: str, variant: str, settings: 
         day["cpr_type"] = day["cpr_type"] or parsed["cpr_type"]
     for day in by_day.values():
         day.pop("_seen", None)
+    if source in {"paper", "live"}:
+        starts = session_starts(log_dir, source, variant)
+        for day in by_day.values():
+            day["sessions"] = starts.get(day["date"], [])
     return list(by_day.values())
+
+
+_SESSION_LOG_RE = re.compile(
+    r"^(?P<prefix>papertrade|livetrade)_(?P<d>\d{2})(?P<m>\d{2})(?P<y>\d{4})_(?P<H>\d{2})(?P<M>\d{2})\d{2}_(?P<variant>v\d+)(?:_main)?\.txt$")
+
+
+def session_starts(log_dir: str, source: str, variant: str) -> dict:
+    """{"YYYY-MM-DD": ["HH:MM", ...]} start times of paper/live sessions, from the run log names.
+
+    The Excel name's time is when its first trade was saved, so the .txt run logs
+    (one per session start or restart) are the record of when a session ran.
+    """
+    prefix = "papertrade" if source == "paper" else "livetrade"
+    out: dict = {}
+    try:
+        names = os.listdir(log_dir)
+    except OSError:
+        return out
+    for name in names:
+        m = _SESSION_LOG_RE.match(name)
+        if not m or m["prefix"] != prefix or m["variant"] != variant:
+            continue
+        out.setdefault(f"{m['y']}-{m['m']}-{m['d']}", []).append(f"{m['H']}:{m['M']}")
+    return {day: sorted(times) for day, times in out.items()}
 
 
 @app.route("/performance")
@@ -2223,11 +2258,8 @@ def performance_page():
     return render_template("performance.html")
 
 
-@app.route("/api/performance")
-def api_performance():
-    log_dir = LOGS_DIR
-    if not os.path.isdir(log_dir):
-        return jsonify({"ok": True, "groups": [], "selected": None, "result": None})
+def performance_groups(log_dir: str) -> list:
+    """Result file groups: one per (source, variant, settings), with day count and date span."""
     groups: dict = {}
     for name in os.listdir(log_dir):
         info = classify_result_file(name)
@@ -2240,6 +2272,20 @@ def api_performance():
         ({"source": g["source"], "variant": g["variant"], "settings": g["settings"], "days": len(g["dates"]),
           "first": min(g["dates"]), "last": max(g["dates"])} for g in groups.values()),
         key=lambda g: (g["source"], g["variant"], g["last"], g["days"]), reverse=True)
+    return group_list
+
+
+def _date_arg(name: str) -> str:
+    value = request.args.get(name, "") or ""
+    return value if DATE_RE.fullmatch(value) else ""
+
+
+@app.route("/api/performance")
+def api_performance():
+    log_dir = LOGS_DIR
+    if not os.path.isdir(log_dir):
+        return jsonify({"ok": True, "groups": [], "selected": None, "result": None})
+    group_list = performance_groups(log_dir)
 
     source = request.args.get("source", "backtest")
     if source not in {"backtest", "paper", "live"}:
@@ -2260,6 +2306,77 @@ def api_performance():
     return jsonify({"ok": True, "groups": group_list,
                     "selected": {"source": source, "variant": variant, "settings": settings, "from": date_from, "to": date_to},
                     "result": result, "holidays": load_market_holidays()})
+
+
+PAPER_LATE_START_AFTER = "09:20"   # a paper session that started after this missed part of the day
+
+
+def compare_paper_backtest(paper_days: list, backtest_days: list, include_late: bool = False) -> dict:
+    """Paper vs backtest on the days both have (pure function).
+
+    Both sides use the same P&L basis: net only when every trade on both sides has
+    charges, else gross. Also lists the days only one side has (backtest days are
+    counted only inside the paper span, so older backtests are not listed).
+    Days with a paper session started after PAPER_LATE_START_AFTER (a late start or a
+    restart during the day) may have missed backtest trades, so they are left out
+    unless include_late. Days without session logs are kept.
+    """
+    late_start = [{"date": d["date"], "start": ", ".join(d["sessions"])}
+                  for d in sorted(paper_days, key=lambda d: d["date"])
+                  if any(t > PAPER_LATE_START_AFTER for t in d.get("sessions") or [])]
+    late_dates = {x["date"] for x in late_start}
+    paper_dates = {d["date"] for d in paper_days}
+    backtest_dates = {d["date"] for d in backtest_days}
+    common = sorted((paper_dates & backtest_dates) - (set() if include_late else late_dates))
+    paper_common = [d for d in paper_days if d["date"] in common]
+    backtest_common = [d for d in backtest_days if d["date"] in common]
+    basis = "net" if has_net_pnl(paper_common) and has_net_pnl(backtest_common) else "gross"
+    span = (min(paper_dates), max(paper_dates)) if paper_dates else ("", "")
+    return {
+        "basis": basis,
+        "common_days": len(common),
+        "only_paper": sorted(paper_dates - backtest_dates),
+        "only_backtest": sorted(d for d in backtest_dates - paper_dates if span[0] <= d <= span[1]),
+        "late_start": [x for x in late_start if x["date"] in backtest_dates],
+        "include_late": include_late,
+        "paper": compute_performance(paper_common, basis) if common else None,
+        "backtest": compute_performance(backtest_common, basis) if common else None,
+    }
+
+
+@app.route("/api/performance/paper-vs-backtest")
+def api_performance_paper_vs_backtest():
+    """One strategy's paper trading against its backtest, on the days both exist."""
+    log_dir = LOGS_DIR
+    if not os.path.isdir(log_dir):
+        return jsonify({"ok": True, "groups": [], "selected": None, "comparison": None})
+    group_list = performance_groups(log_dir)
+    variant = request.args.get("variant", "v28")
+    date_from, date_to = _date_arg("from"), _date_arg("to")
+
+    paper_groups = [g for g in group_list if g["source"] == "paper" and g["variant"] == variant]
+    paper_settings = request.args.get("paper_settings", "")
+    if not any(g["settings"] == paper_settings for g in paper_groups):
+        paper_groups.sort(key=lambda g: (g["days"], g["last"]), reverse=True)
+        paper_settings = paper_groups[0]["settings"] if paper_groups else ""
+    paper_days = collect_performance_days(log_dir, "paper", variant, paper_settings, date_from, date_to) if paper_settings else []
+
+    backtest_groups = [g for g in group_list if g["source"] == "backtest" and g["variant"] == variant]
+    backtest_settings = request.args.get("backtest_settings", "")
+    if not any(g["settings"] == backtest_settings for g in backtest_groups):
+        # Default: the backtest with the paper's settings, downloaded CSVs first, then the most days.
+        backtest_groups.sort(key=lambda g: (g["settings"].split(" (")[0] == paper_settings,
+                                            g["settings"].endswith("(csv)"), g["days"], g["last"]), reverse=True)
+        backtest_settings = backtest_groups[0]["settings"] if backtest_groups else ""
+    backtest_days = (collect_performance_days(log_dir, "backtest", variant, backtest_settings, date_from, date_to)
+                     if backtest_settings else [])
+
+    include_late = request.args.get("include_late") == "1"
+    comparison = compare_paper_backtest(paper_days, backtest_days, include_late) if paper_days and backtest_days else None
+    return jsonify({"ok": True, "groups": group_list,
+                    "selected": {"variant": variant, "paper_settings": paper_settings, "include_late": include_late,
+                                 "backtest_settings": backtest_settings, "from": date_from, "to": date_to},
+                    "comparison": comparison})
 
 
 MARKET_HOLIDAYS_FILE = os.path.join(WORKDIR, "scripts", "market_holidays.txt")

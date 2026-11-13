@@ -113,6 +113,76 @@ class LiveFilesTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class PaperVsBacktestTests(unittest.TestCase):
+    def test_common_days_and_same_basis(self):
+        paper = [{"date": "2026-11-12", "trades": [t(887.0)]}, {"date": "2026-11-13", "trades": [t(-741.0)]},
+                 {"date": "2026-11-14", "trades": [t(100.0)]}]                       # no backtest that day
+        backtest = [{"date": "2026-11-05", "trades": [t(500.0, 450.0)]},             # before paper started
+                    {"date": "2026-11-12", "trades": [t(1000.0, 920.0)]},
+                    {"date": "2026-11-13", "trades": [t(-780.0, -927.0)]}]
+        r = webapp.compare_paper_backtest(paper, backtest)
+        self.assertEqual((r["common_days"], r["only_paper"], r["only_backtest"]), (2, ["2026-11-14"], []))
+        # paper has no charges, so both sides are gross
+        self.assertEqual(r["basis"], "gross")
+        self.assertEqual((r["paper"]["kpis"]["net_pnl"], r["backtest"]["kpis"]["net_pnl"]), (146.0, 220.0))
+        self.assertEqual(r["backtest"]["kpis"]["basis"], "gross")
+        # with charges on both sides, both are net
+        paper_net = [dict(d, trades=[t(x["pnl_rs"], x["pnl_rs"] - 70)]) for d, x in ((d, d["trades"][0]) for d in paper)]
+        self.assertEqual(webapp.compare_paper_backtest(paper_net, backtest)["basis"], "net")
+        self.assertIsNone(webapp.compare_paper_backtest(paper[2:], backtest)["paper"])   # no common day
+
+    def test_backtest_days_inside_the_paper_span_are_listed(self):
+        paper = [{"date": "2026-11-11", "trades": []}, {"date": "2026-11-13", "trades": [t(10.0)]}]
+        backtest = [{"date": d, "trades": [t(5.0)]} for d in ("2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13")]
+        r = webapp.compare_paper_backtest(paper, backtest)
+        self.assertEqual((r["common_days"], r["only_backtest"]), (2, ["2026-11-12"]))
+
+    def test_late_paper_start_left_out_unless_asked(self):
+        # 9 Nov: paper restarted at 11:28 and missed the backtest's 09:25 trade; 13 Nov restarted
+        # before the open (harmless); 12 Nov has no session logs (kept).
+        paper = [{"date": "2026-11-09", "sessions": ["08:47", "11:28"], "trades": [t(3253.0)]},
+                 {"date": "2026-11-12", "trades": []},
+                 {"date": "2026-11-13", "sessions": ["08:50", "09:12"], "trades": [t(-702.0)]}]
+        backtest = [{"date": "2026-11-09", "trades": [t(-1690.0)]}, {"date": "2026-11-12", "trades": []},
+                    {"date": "2026-11-13", "trades": [t(-455.0)]}]
+        r = webapp.compare_paper_backtest(paper, backtest)
+        self.assertEqual((r["common_days"], r["late_start"]), (2, [{"date": "2026-11-09", "start": "08:47, 11:28"}]))
+        self.assertEqual(r["paper"]["kpis"]["net_pnl"], -702.0)
+        r = webapp.compare_paper_backtest(paper, backtest, include_late=True)
+        self.assertEqual((r["common_days"], r["paper"]["kpis"]["net_pnl"]), (3, 2551.0))
+
+    def test_first_session_from_file_names(self):
+        import shutil
+        import tempfile
+
+        import pandas as pd
+
+        tmp = tempfile.mkdtemp(prefix="perf_pvb_")
+        try:
+            row = {"entry_time": "2026-11-09 11:28:00", "side": "CE", "option_symbol": "X", "exit_reason": "TRAILING_STOP_HIT",
+                   "pnl_rs": 3253.25, "pnl_points": 50.05}
+            with pd.ExcelWriter(Path(tmp) / "papertrade_09112026_113819_mtf5min_mfe_max2_sl25_v28.xlsx") as xw:
+                pd.DataFrame([row]).to_excel(xw, sheet_name="live_trade_events", index=False)
+            for name in ("papertrade_09112026_112806_v28.txt", "papertrade_09112026_084734_v28.txt",
+                         "papertrade_09112026_084736_v30.txt", "papertrade_01092026_091006_v28_main.txt"):
+                (Path(tmp) / name).write_text("log", encoding="utf-8")
+            days = webapp.collect_performance_days(tmp, "paper", "v28", "mtf5min_mfe_max2_sl25")
+            self.assertEqual(days[0]["sessions"], ["08:47", "11:28"])   # the Excel's 11:38 is not a session start
+            self.assertEqual(webapp.session_starts(tmp, "paper", "v28")["2026-09-01"], ["09:10"])
+        finally:
+            webapp._PERF_CACHE.clear()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_route(self):
+        user = webapp.app.test_client()
+        with user.session_transaction() as s:
+            s["logged_in"] = True
+        j = user.get("/api/performance/paper-vs-backtest?variant=v30&from=bad").get_json()
+        self.assertTrue(j["ok"])
+        self.assertEqual(j["selected"]["from"] if j["selected"] else "", "")
+        self.assertEqual(webapp.app.test_client().get("/api/performance/paper-vs-backtest").status_code, 401)
+
+
 class RouteTests(unittest.TestCase):
     def test_login_required_and_page(self):
         anon = webapp.app.test_client()

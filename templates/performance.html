@@ -67,7 +67,7 @@
     .cmp-table { overflow-x: auto; }
     .cmp-settings { width: 300px; max-width: 100%; text-overflow: ellipsis; }
     @media (max-width: 700px) {
-      .filters label.compare-only { flex-basis: 100%; }
+      .filters label.compare-only, .filters label.pvb-only { flex-basis: 100%; }
       .cmp-settings { width: 100%; }
     }
     .cmp-table td.better { font-weight: 600; color: var(--text-primary); }
@@ -218,7 +218,7 @@
     </label>
     <label>From <input type="date" id="from" /></label>
     <label>To <input type="date" id="to" /></label>
-    <label>Source
+    <label id="source-label">Source
       <select id="source"><option value="backtest">Backtest</option><option value="paper">Paper trading</option><option value="live">Live trading</option></select>
     </label>
   </div>
@@ -227,9 +227,10 @@
       <span style="display:flex; gap:4px">
         <button type="button" data-view="single" class="active">One strategy</button>
         <button type="button" data-view="compare">Compare v28 vs v30</button>
+        <button type="button" data-view="pvb">Paper vs backtest</button>
       </span>
     </label>
-    <label class="single-only">Strategy
+    <label class="strategy-ctl">Strategy
       <select id="variant"><option value="v28">v28</option><option value="v30">v30</option></select>
     </label>
     <label class="single-only">Settings
@@ -241,18 +242,27 @@
     <label class="compare-only" hidden>v30 settings
       <select id="settings-v30" class="cmp-settings"></select>
     </label>
+    <label class="pvb-only" hidden>Backtest settings
+      <select id="settings-backtest" class="cmp-settings pvb-settings"></select>
+    </label>
+    <label class="pvb-only" hidden>Paper settings
+      <select id="settings-paper" class="cmp-settings pvb-settings"></select>
+    </label>
+    <label class="pvb-only pvb-check" hidden>
+      <span><input type="checkbox" id="include-late" /> Include days paper started late or restarted (after 09:20)</span>
+    </label>
   </div>
   <div id="basis" class="basis"></div>
 
   <div id="compare" hidden>
     <div class="card">
-      <h2>v28 vs v30</h2>
+      <h2 id="cmp-title">v28 vs v30</h2>
       <div id="cmp-table" class="cmp-table"></div>
     </div>
     <div class="card">
       <h2>Equity curves (cumulative P&amp;L)</h2>
       <div id="cmp-legend" class="cmp-legend"></div>
-      <div id="cmp-equity" class="chart" role="img" aria-label="Equity curves of v28 and v30"></div>
+      <div id="cmp-equity" class="chart" role="img" aria-label="Equity curves side by side"></div>
     </div>
     <div class="grid2">
       <div class="card">
@@ -627,6 +637,7 @@
 
     async function load(keepSettings = true){
       if(view === 'compare') return loadCompare(keepSettings);
+      if(view === 'pvb') return loadPaperVsBacktest(keepSettings);
       const content = document.getElementById('content');
       content.classList.add('loading');
       const params = new URLSearchParams({
@@ -742,7 +753,83 @@
       }
       groups = res[0].groups || [];
       CMP.forEach((c, i) => fillSettingsFor('settings-' + c.variant, c.variant, res[i].selected && res[i].selected.settings));
-      renderCompare(CMP.map((c, i) => ({...c, result: res[i].result, settings: res[i].selected && res[i].selected.settings})));
+      const items = CMP.map((c, i) => ({name: c.variant, color: c.color(), result: res[i].result,
+                                        settings: res[i].selected && res[i].selected.settings}));
+      document.getElementById('cmp-title').textContent = 'v28 vs v30';
+      const ok = items.filter(it => it.result && it.result.daily.length);
+      const [ka, kb] = items.map(it => it.result && it.result.kpis);
+      renderCompare(items, {
+        missing: ok.length ? `Only ${ok[0].name} has results for this selection.` : '',
+        empty: 'Both v28 and v30 need results for this selection to compare.',
+        basis: ok.length < 2 ? '' : `v28: ${items[0].settings} · v30: ${items[1].settings}. ` + (ka.basis === kb.basis
+          ? (ka.basis === 'net' ? 'Both net of slippage and charges.' : 'Both before charges.')
+          : 'Note: one side is net of charges and the other is not, so totals are not like for like.'),
+      });
+      box.classList.remove('loading');
+    }
+
+    // ---- Paper vs backtest view: one strategy's paper trades against its backtest, common days only ----
+    function fillSettingsFrom(selectId, source, variant, selected){
+      const sel = document.getElementById(selectId);
+      const options = groups.filter(g => g.source === source && g.variant === variant);
+      sel.replaceChildren(...options.map(g => {
+        const o = el('option', {value: g.settings, title: `${g.settings} — ${g.days} day(s), ${g.first} to ${g.last}`},
+          `${g.settings} · ${g.days} days`);
+        if(g.settings === selected) o.selected = true;
+        return o;
+      }));
+    }
+
+    async function loadPaperVsBacktest(keepSettings = true){
+      const box = document.getElementById('compare');
+      box.classList.add('loading');
+      const variant = document.getElementById('variant').value;
+      const params = new URLSearchParams({
+        variant, from: document.getElementById('from').value, to: document.getElementById('to').value,
+        paper_settings: keepSettings ? (document.getElementById('settings-paper').value || '') : '',
+        backtest_settings: keepSettings ? (document.getElementById('settings-backtest').value || '') : '',
+        include_late: document.getElementById('include-late').checked ? '1' : '0',
+      });
+      let j;
+      try {
+        const r = await fetch('/api/performance/paper-vs-backtest?' + params);
+        if(r.status === 401){ location.href = '/login'; return; }
+        j = await r.json();
+      } catch(error) {
+        document.getElementById('basis').textContent = 'Could not load performance data: ' + error.message;
+        box.classList.remove('loading');
+        return;
+      }
+      groups = j.groups || [];
+      const sel = j.selected || {};
+      fillSettingsFrom('settings-backtest', 'backtest', variant, sel.backtest_settings);
+      fillSettingsFrom('settings-paper', 'paper', variant, sel.paper_settings);
+      document.getElementById('cmp-title').textContent = `${variant}: backtest vs paper`;
+      const c = j.comparison;
+      const items = [
+        {name: 'Backtest', color: css('--series-v28'), result: c && c.backtest, settings: sel.backtest_settings},
+        {name: 'Paper', color: css('--series-v30'), result: c && c.paper, settings: sel.paper_settings},
+      ];
+      let basis = '';
+      if(c && c.common_days){
+        const extra = [];
+        if(c.only_paper.length) extra.push(`paper only: ${c.only_paper.join(', ')}`);
+        if(c.only_backtest.length) extra.push(`backtest only: ${c.only_backtest.join(', ')}`);
+        if(c.late_start.length && !c.include_late)
+          extra.push(`paper started late or restarted: ${c.late_start.map(x => `${x.date} (sessions ${x.start})`).join(', ')}`);
+        basis = `${variant} on the ${c.common_days} day(s) with both paper and backtest results` +
+          (extra.length ? ` (left out — ${extra.join('; ')})` : '') + '. ' +
+          (c.basis === 'net' ? 'Both net of charges; backtest also includes its slippage.'
+                             : 'Both before charges (backtest P&L includes its slippage).');
+      }
+      renderCompare(items, {
+        missing: '', basis,
+        empty: !sel.paper_settings ? `No paper trading results for ${variant} yet.`
+          : !sel.backtest_settings ? `No backtest results for ${variant} yet.`
+          : (c && c.late_start.length && !c.include_late)
+            ? 'The only common days are days paper started late or restarted. Tick the box above to include them.'
+          : 'Paper and backtest have no days in common for this selection. Run the backtest for the paper days.',
+      });
       box.classList.remove('loading');
     }
 
@@ -794,22 +881,23 @@
       hit.addEventListener('pointerleave', hide); hit.addEventListener('blur', hide);
     }
 
-    function renderCompare(items){
+    // Two result sets side by side. items: [{name, color, result, settings}] (A first, B second).
+    // opts: {basis, missing, empty} texts for the line above and for an empty selection.
+    function renderCompare(items, opts){
       const basis = document.getElementById('basis');
       const ids = ['cmp-table', 'cmp-equity', 'cmp-month', 'cmp-days'];
       const ok = items.filter(it => it.result && it.result.daily.length);
       document.getElementById('cmp-legend').replaceChildren();
       document.getElementById('cmp-days-sum').textContent = '';
       if(ok.length < 2){
-        basis.textContent = ok.length ? `Only ${ok[0].variant} has results for this selection.` : '';
-        ids.forEach(id => document.getElementById(id).replaceChildren(el('div', {class: 'empty'}, 'Both v28 and v30 need results for this selection to compare.')));
+        basis.textContent = opts.missing || '';
+        ids.forEach(id => document.getElementById(id).replaceChildren(el('div', {class: 'empty'}, opts.empty)));
         return;
       }
       const [a, b] = items;
+      const A = a.name, B = b.name, DIFF = `${B} − ${A}`;
       const ka = a.result.kpis, kb = b.result.kpis;
-      basis.textContent = `v28: ${a.settings} · v30: ${b.settings}. ` + (ka.basis === kb.basis
-        ? (ka.basis === 'net' ? 'Both net of slippage and charges.' : 'Both before charges.')
-        : 'Note: one side is net of charges and the other is not, so totals are not like for like.');
+      basis.textContent = opts.basis || '';
 
       // Metrics side by side. hi = higher is better, lo = lower is better, '' = no winner.
       const pf = v => v === null ? '—' : v.toFixed(2);
@@ -821,7 +909,7 @@
       ];
       const tbl = el('table');
       const hr = el('tr');
-      ['', 'v28', 'v30', 'v30 − v28', 'Better'].forEach((h, i) => hr.appendChild(el('th', i ? {class: i < 4 ? 'num' : ''} : {}, h)));
+      ['', A, B, DIFF, 'Better'].forEach((h, i) => hr.appendChild(el('th', i ? {class: i < 4 ? 'num' : ''} : {}, h)));
       tbl.appendChild(el('thead')).appendChild(hr);
       const body = el('tbody');
       metrics.forEach(([label, key, dir, fmt]) => {
@@ -829,8 +917,8 @@
         const tr = el('tr');
         tr.appendChild(el('td', {}, label));
         let better = '';
-        if(dir && va !== null && vb !== null && va !== vb) better = (dir === 'hi' ? vb > va : vb < va) ? 'v30' : 'v28';
-        [['v28', va], ['v30', vb]].forEach(([v, val]) => tr.appendChild(el('td', {class: 'num' + (better === v ? ' better' : '')}, fmt(val))));
+        if(dir && va !== null && vb !== null && va !== vb) better = (dir === 'hi' ? vb > va : vb < va) ? B : A;
+        [[A, va], [B, vb]].forEach(([v, val]) => tr.appendChild(el('td', {class: 'num' + (better === v ? ' better' : '')}, fmt(val))));
         const diff = (va === null || vb === null) ? '—'
           : (key === 'win_rate' ? `${(vb - va) >= 0 ? '+' : '−'}${Math.abs(vb - va).toFixed(1)} pts`
           : key === 'profit_factor' ? `${(vb - va) >= 0 ? '+' : '−'}${Math.abs(vb - va).toFixed(2)}`
@@ -849,7 +937,7 @@
       const series = items.map((it, k) => {
         let eq = 0;
         const values = dates.map(dt => { if(byDate[k][dt]) eq = byDate[k][dt].equity; return eq; });
-        return {name: it.variant, color: it.color(), values};
+        return {name: it.name, color: it.color, values};
       });
       const legend = document.getElementById('cmp-legend');
       series.forEach(s => {
@@ -870,9 +958,9 @@
       });
       document.getElementById('cmp-month').replaceChildren(table([
         {label: 'Month', value: r => r.label},
-        {label: 'v28', num: true, value: r => fmtRs(r.a), sign: r => r.a},
-        {label: 'v30', num: true, value: r => fmtRs(r.b), sign: r => r.b},
-        {label: 'v30 − v28', num: true, value: r => fmtRs(r.b - r.a)},
+        {label: A, num: true, value: r => fmtRs(r.a), sign: r => r.a},
+        {label: B, num: true, value: r => fmtRs(r.b), sign: r => r.b},
+        {label: DIFF, num: true, value: r => fmtRs(r.b - r.a)},
       ], monthRows));
 
       // Day by day.
@@ -884,12 +972,12 @@
         return {date: dt, weekday: (da || db).weekday, a: pa, b: pb, ta: da ? da.trades : 0, tb: db ? db.trades : 0};
       }).reverse();
       document.getElementById('cmp-days-sum').textContent =
-        `${dates.length} day(s): v28 better on ${aWins}, v30 better on ${bWins}, same on ${same}`;
+        `${dates.length} day(s): ${A} better on ${aWins}, ${B} better on ${bWins}, same on ${same}`;
       document.getElementById('cmp-days').replaceChildren(table([
         {label: 'Date', value: r => r.date}, {label: 'Day', value: r => r.weekday},
-        {label: 'v28', num: true, value: r => `${fmtRs(r.a)} (${r.ta})`, sign: r => r.a},
-        {label: 'v30', num: true, value: r => `${fmtRs(r.b)} (${r.tb})`, sign: r => r.b},
-        {label: 'v30 − v28', num: true, value: r => fmtRs(r.b - r.a)},
+        {label: A, num: true, value: r => `${fmtRs(r.a)} (${r.ta})`, sign: r => r.a},
+        {label: B, num: true, value: r => `${fmtRs(r.b)} (${r.tb})`, sign: r => r.b},
+        {label: DIFF, num: true, value: r => fmtRs(r.b - r.a)},
       ], dayRows));
     }
 
@@ -897,14 +985,18 @@
       view = next;
       document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
       document.querySelectorAll('.single-only').forEach(n => { n.hidden = view !== 'single'; });
+      document.querySelectorAll('.strategy-ctl').forEach(n => { n.hidden = view === 'compare'; });
       document.querySelectorAll('.compare-only').forEach(n => { n.hidden = view !== 'compare'; });
+      document.querySelectorAll('.pvb-only').forEach(n => { n.hidden = view !== 'pvb'; });
+      document.getElementById('source-label').hidden = view === 'pvb';   // paper vs backtest picks both sources
       document.getElementById('content').hidden = view !== 'single';
-      document.getElementById('compare').hidden = view !== 'compare';
+      document.getElementById('compare').hidden = view === 'single';
       try { localStorage.setItem('perfView', view); } catch(e) {}
       load(false);
     }
     document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
     document.querySelectorAll('.cmp-settings').forEach(s => s.addEventListener('change', () => load()));
+    document.getElementById('include-late').addEventListener('change', () => load());
 
     document.querySelectorAll('[data-preset]').forEach(btn => btn.addEventListener('click', () => {
       preset = btn.dataset.preset;
@@ -924,8 +1016,8 @@
     let resizeTimer;
     window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => load(), 200); });
     let savedView = 'single';
-    try { savedView = localStorage.getItem('perfView') === 'compare' ? 'compare' : 'single'; } catch(e) {}
-    if(savedView === 'compare') setView('compare'); else load(false);
+    try { const v = localStorage.getItem('perfView'); savedView = ['compare', 'pvb'].includes(v) ? v : 'single'; } catch(e) {}
+    if(savedView !== 'single') setView(savedView); else load(false);
   </script>
 </body>
 </html>
