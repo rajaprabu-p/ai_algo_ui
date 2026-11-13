@@ -72,6 +72,24 @@ class DeployCheckTests(unittest.TestCase):
         # a dashboard file never blocks LIVE_ORDER: the engine checks "files" only
         self.assertTrue(deploy_check.check(self.scripts).ok)
 
+    def test_commit_from_version(self):
+        self.assertEqual(deploy_check.commit_from_version("2026-11-13_1825_6a2485f"), "6a2485f")
+        self.assertEqual(deploy_check.commit_from_version(" 2026-11-13_1821_5089875-dirty "), "5089875")
+        for bad in ("", "2026-11-13_1821_nogit", "unknown", "2026-11-13_1825"):
+            self.assertEqual(deploy_check.commit_from_version(bad), "")
+
+    def test_upload_list_keeps_deployed_files_only(self):
+        (self.tmp / "templates").mkdir()
+        (self.tmp / "app.py").write_text("app = 1\n", encoding="utf-8")
+        (self.tmp / "templates" / "index.html").write_text("<html>\n", encoding="utf-8")
+        changed = ["app.py", "templates/index.html", "scripts/strategy/engine.py", "scripts/tests/test_x.py",
+                   "AUTOMATION.md", "scripts/editable_config.json", ".env", "scripts/v28_strategy_main.py"]
+        self.assertEqual(deploy_check.upload_list(changed, self.scripts), [
+            "app.py", "scripts/strategy/engine.py", "scripts/v28_strategy_main.py", "templates/index.html",
+            "scripts/strategy/MANIFEST.json",
+        ])
+        self.assertEqual(deploy_check.upload_list([], self.scripts), ["scripts/strategy/MANIFEST.json"])
+
     def test_old_manifest_without_dashboard_files(self):
         import json
         path = self.scripts / "strategy" / "MANIFEST.json"

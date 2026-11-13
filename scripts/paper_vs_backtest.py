@@ -21,6 +21,9 @@ Two kinds of findings:
 Verdicts: MATCH, DIFFERENT, NO_PAPER_TRADES (paper did not run or did not trade
 while the backtest did), NO_TRADES (neither traded), NO_DATA (no downloaded
 option files yet), ERROR. Reports go to logs/parity/parity_<date>.json and .txt.
+The backtest workbook is also saved to the strategy log folder (same name a backtest
+run from the dashboard writes), so the Today cards and the Performance page have the
+day's backtest without running it by hand; --no-save-backtest skips that.
 
 Usage (from anywhere; paths resolve from this file):
     venv/bin/python scripts/paper_vs_backtest.py                  # today, both variants
@@ -111,7 +114,21 @@ def option_files_exist(trade_day: date) -> bool:
     return any(OPTION_DAILY_DIR.glob(f"nifty_weekly_*_{trade_day.isoformat()}.csv"))
 
 
-def run_backtest(variant: str, trade_day: date, env_file: dict | None = None) -> tuple[pd.DataFrame, dict, str]:
+def save_backtest_workbook(book: Path, save_dir: Path | None) -> str:
+    """Copy the backtest workbook into the strategy log folder; returns the saved name ('' if not saved)."""
+    if save_dir is None:
+        return ""
+    try:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(book, save_dir / book.name)
+        return book.name
+    except OSError as exc:
+        log(f"could not save {book.name} to {save_dir}: {exc}")
+        return ""
+
+
+def run_backtest(variant: str, trade_day: date, env_file: dict | None = None,
+                 save_dir: Path | None = None) -> tuple[pd.DataFrame, dict, str]:
     """Backtest one day in a temp copy of scripts/. Returns (trades, summary metrics, error text).
 
     The strategy loads the project's .env with override=True, which would replace
@@ -145,6 +162,7 @@ def run_backtest(variant: str, trade_day: date, env_file: dict | None = None) ->
         summary = pd.read_excel(books[0], sheet_name="summary")
         metrics = dict(zip(summary["metric"].astype(str), summary["value"]))
         metrics["_workbook_name"] = books[0].name
+        metrics["_saved_as"] = save_backtest_workbook(books[0], save_dir)
         if len(trades):
             trades["entry_time"] = _naive(trades["entry_time"])
             trades["exit_time"] = _naive(trades["exit_time"])
@@ -273,6 +291,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--date", help="Trading date YYYY-MM-DD (default: today IST)")
     parser.add_argument("--variant", choices=sorted(VARIANTS), action="append", help="Default: v28 and v30")
+    parser.add_argument("--no-save-backtest", action="store_true",
+                        help="Do not save the backtest workbook to the strategy log folder")
     args = parser.parse_args()
 
     now = datetime.now(IST)
@@ -304,7 +324,10 @@ def main() -> int:
     results, worst = {}, 0
     for variant in variants:
         paper, files = load_paper_trades(log_dir, trade_day, variant)
-        backtest, metrics, error = run_backtest(variant, trade_day, env)
+        backtest, metrics, error = run_backtest(variant, trade_day, env,
+                                                None if args.no_save_backtest else log_dir)
+        if metrics.get("_saved_as"):
+            log(f"{variant}: backtest saved as {log_dir / metrics['_saved_as']}")
         if error:
             results[variant] = {"verdict": "ERROR", "issues": [error], "paper_files": files,
                                 "paper_trades": len(paper), "backtest_trades": 0}

@@ -166,13 +166,16 @@ Exit codes: `0` ok or nothing to do · `1` a download failed · `2` Kite login o
 ## 4b. Paper vs backtest check
 
 After the day's option candles are downloaded, `scripts/paper_vs_backtest.py` backtests that day
-(in an isolated temporary copy, so your log folder is not touched) and compares the result with
-the day's paper trades for v28 and v30. Paper trades are read from `STRATEGY_LOG_DIR`
-(`papertrade_<ddmmyyyy>_*_<variant>.xlsx`, all sessions of the day merged).
+(in an isolated temporary copy) and compares the result with the day's paper trades for v28 and
+v30. Paper trades are read from `STRATEGY_LOG_DIR` (`papertrade_<ddmmyyyy>_*_<variant>.xlsx`, all
+sessions of the day merged). The backtest workbook is then saved to `STRATEGY_LOG_DIR` under the
+same name a dashboard backtest run writes, so the Today cards' **Backtest P&L** line and the
+Performance page have the day's backtest without a manual run (`--no-save-backtest` skips this).
 
-Trades are paired by side and entry time (within 3 minutes). For each pair it checks the contract,
-exit reason, entry/exit prices (after removing the backtest's slippage, since paper fills at the
-signal price; tolerance 1.5 points) and exit time (tolerance 3 minutes).
+Trades are paired by side and entry time (within 3 minutes). Different decisions (contract, exit
+reason, a trade on one side only) are **issues** and make the verdict DIFFERENT. Fill differences
+are **drifts** and are only listed: entry/exit price beyond 2.5 points (after removing the
+backtest's slippage) and entry/exit time more than 1 minute apart.
 
 | Verdict | Meaning |
 |---|---|

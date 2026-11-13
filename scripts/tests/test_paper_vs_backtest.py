@@ -78,6 +78,18 @@ class CompareTests(unittest.TestCase):
         bt = pd.DataFrame([trade("CE", "09:25", "09:40", 150.0, 175.0, "TRAILING_STOP_HIT")])
         self.assertEqual(pvb.compare(empty, bt)["verdict"], "NO_PAPER_TRADES")
 
+    def test_backtest_workbook_saved_to_log_folder(self):
+        tmp = Path(tempfile.mkdtemp(prefix="pvb_save_"))
+        try:
+            book = tmp / "backtest_13112026_mtf5min_mfe_max2_sl25_v30_csv.xlsx"
+            book.write_bytes(b"xlsx")
+            out = tmp / "logs"
+            self.assertEqual(pvb.save_backtest_workbook(book, out), book.name)
+            self.assertEqual((out / book.name).read_bytes(), b"xlsx")
+            self.assertEqual(pvb.save_backtest_workbook(book, None), "")   # --no-save-backtest
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_settings_tags(self):
         self.assertEqual(pvb.settings_tag_from_name("papertrade_21102026_102400_mtf5min_max2_sl25_v28.xlsx"), "mtf5min_max2_sl25")
         self.assertEqual(pvb.settings_tag_from_name("backtest_21102026_mtf5min_mfe_max2_sl25_v28_csv.xlsx"), "mtf5min_mfe_max2_sl25")

@@ -172,6 +172,24 @@ def check_app(scripts_dir: Path = SCRIPTS_DIR) -> CheckResult:
     return result
 
 
+def commit_from_version(version: str) -> str:
+    """Commit hash inside a manifest version, e.g. '2026-11-13_1825_6a2485f' -> '6a2485f' ('' if none)."""
+    tail = str(version or "").strip().rsplit("_", 1)[-1]
+    tail = tail[:-len("-dirty")] if tail.endswith("-dirty") else tail
+    return tail if 7 <= len(tail) <= 40 and all(c in "0123456789abcdef" for c in tail.lower()) else ""
+
+
+def upload_list(changed: list[str], scripts_dir: Path = SCRIPTS_DIR) -> list[str]:
+    """Files to upload (project-relative) from git's changed paths: only deployed files, plus the manifest.
+
+    Deployed = the manifest's strategy files and dashboard files. Tests, docs, data and
+    settings (.env, editable_config.json) are never listed.
+    """
+    deployed = {f"scripts/{rel}" for rel in tracked_files(scripts_dir)} | set(app_tracked_files(scripts_dir.parent))
+    files = sorted({p for p in changed if p in deployed})
+    return files + [f"scripts/strategy/{MANIFEST_NAME}"]
+
+
 def verify_or_exit(run_mode: str, scripts_dir: Path = SCRIPTS_DIR, environ=None) -> CheckResult:
     """Print the check result; raise SystemExit(4) when LIVE_ORDER must not start."""
     environ = os.environ if environ is None else environ
