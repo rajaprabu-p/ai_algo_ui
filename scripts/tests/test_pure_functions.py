@@ -665,6 +665,67 @@ class PapertradeNiftySummaryTests(StrategyTestCase):
             self.assertEqual(values["nifty_low"], "")
 
 
+class AdoptedPositionProtectionTests(StrategyTestCase):
+    """LIVE_ORDER restart with an open broker position: cancel the old stop, arm a new one."""
+
+    class FakeKite:
+        TRANSACTION_TYPE_SELL = "SELL"
+
+        def __init__(self, reject_sl=False):
+            self.cancelled, self.placed, self.reject_sl = [], [], reject_sl
+
+        def cancel_order(self, variety, order_id):
+            self.cancelled.append((variety, order_id))
+
+        def place_order(self, **params):
+            if self.reject_sl:
+                raise RuntimeError("RMS: rejected")
+            self.placed.append(params)
+            return "NEW-SL-1"
+
+    ORDERS = [
+        {"order_id": "OLD-SL", "tradingsymbol": "NIFTY26N1725150CE", "transaction_type": "SELL",
+         "status": "TRIGGER PENDING", "tag": "RP_ALGO", "variety": "regular", "order_type": "SL-M"},
+        {"order_id": "ENTRY", "tradingsymbol": "NIFTY26N1725150CE", "transaction_type": "BUY",
+         "status": "COMPLETE", "tag": "RP_ALGO"},
+        {"order_id": "MANUAL", "tradingsymbol": "NIFTY26N1725150CE", "transaction_type": "SELL",
+         "status": "TRIGGER PENDING", "tag": ""},                                  # user's own order: kept
+        {"order_id": "OTHER", "tradingsymbol": "NIFTY26N1725100PE", "transaction_type": "SELL",
+         "status": "TRIGGER PENDING", "tag": "RP_ALGO"},                           # other symbol: kept
+        {"order_id": "DONE", "tradingsymbol": "NIFTY26N1725150CE", "transaction_type": "SELL",
+         "status": "CANCELLED", "tags": ["RP_ALGO"]},                              # not pending: kept
+    ]
+
+    def test_cancels_old_stop_and_places_new_one(self):
+        for m in self.each_module():
+            kite = self.FakeKite()
+            with mock.patch("builtins.print"), mock.patch.object(m, "ENABLE_LIVE_ORDERS", True), \
+                    mock.patch.object(m, "ENABLE_EMERGENCY_SL_ORDER", True), mock.patch.object(m, "FIXED_SL_POINTS", 25):
+                out = m.rearm_adopted_position_protection(kite, "NIFTY26N1725150CE", 65, 186.0, self.ORDERS)
+            self.assertEqual(kite.cancelled, [("regular", "OLD-SL")])
+            self.assertEqual(len(kite.placed), 1)
+            sl = kite.placed[0]
+            self.assertEqual((sl["tradingsymbol"], sl["transaction_type"], sl["quantity"], sl["order_type"]),
+                             ("NIFTY26N1725150CE", "SELL", 65, "SL-M"))
+            self.assertEqual((out["emergency_sl_order_id"], out["emergency_sl_price"], out["trailing_stop_price"]),
+                             ("NEW-SL-1", 161.0, 161.0))
+            self.assertEqual(out["adopt_cancelled_order_ids"], "OLD-SL")
+
+    def test_rejected_stop_keeps_a_software_stop(self):
+        for m in self.each_module():
+            kite = self.FakeKite(reject_sl=True)
+            with mock.patch("builtins.print"), mock.patch.object(m, "ENABLE_LIVE_ORDERS", True), \
+                    mock.patch.object(m, "ENABLE_EMERGENCY_SL_ORDER", True), mock.patch.object(m, "FIXED_SL_POINTS", 25):
+                out = m.rearm_adopted_position_protection(kite, "NIFTY26N1725150CE", 65, 186.0, [])
+            self.assertEqual((out["emergency_sl_order_id"], out["emergency_sl_price"], out["trailing_stop_price"]),
+                             ("", 161.0, 161.0))
+
+    def test_own_pending_exit_order(self):
+        for m in self.each_module():
+            own = [o["order_id"] for o in self.ORDERS if m.is_own_pending_exit_order(o, "nifty26n1725150ce")]
+            self.assertEqual(own, ["OLD-SL"])
+
+
 class GiftNiftyTests(StrategyTestCase):
     class OkKite:
         def __init__(self):

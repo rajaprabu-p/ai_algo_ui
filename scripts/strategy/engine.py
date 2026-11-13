@@ -951,6 +951,73 @@ def place_emergency_sl_order(kite: KiteConnect, tradingsymbol: str, qty: int, en
     }
 
 
+PENDING_ORDER_STATUSES = {"OPEN", "TRIGGER PENDING", "PUT ORDER REQ RECEIVED", "VALIDATION PENDING",
+                          "OPEN PENDING", "MODIFY VALIDATION PENDING", "MODIFY PENDING", "AMO REQ RECEIVED"}
+
+
+def is_own_pending_exit_order(order: Dict, tradingsymbol: str) -> bool:
+    """A still-working SELL order this app placed (tag RP_ALGO) for the symbol: an old stop or exit."""
+    if str(order.get("tradingsymbol") or "").strip().upper() != str(tradingsymbol or "").strip().upper():
+        return False
+    if str(order.get("transaction_type") or "").strip().upper() != "SELL":
+        return False
+    if normalize_order_status(order.get("status")) not in PENDING_ORDER_STATUSES:
+        return False
+    tags = {str(order.get("tag") or "")} | {str(t) for t in (order.get("tags") or []) if t}
+    return LIVE_ORDER_TAG in tags
+
+
+def rearm_adopted_position_protection(kite: KiteConnect, tradingsymbol: str, qty: int, entry_price: float,
+                                      orders: Optional[List[Dict]] = None) -> Dict:
+    """Protect a position taken over from the broker when LIVE_ORDER starts (e.g. after a crash).
+
+    1. Cancel this app's still-working SELL orders for the symbol (the previous session's
+       stop, or an unfilled exit). Left alone, an old stop could fire after the strategy
+       has already sold and open a short position.
+    2. Place a fresh broker stop at entry - FIXED_SL_POINTS, linked to the position.
+    If the new stop is rejected, the stop price is still returned so the software stop
+    covers the position. Returns the fields to merge into the adopted broker entry.
+    """
+    cancelled = []
+    for order in orders or []:
+        if not is_own_pending_exit_order(order, tradingsymbol):
+            continue
+        order_id = str(order.get("order_id") or "").strip()
+        if not order_id:
+            continue
+        try:
+            kite.cancel_order(variety=str(order.get("variety") or LIVE_ORDER_VARIETY), order_id=order_id)
+            cancelled.append(order_id)
+        except Exception as exc:
+            print(f"[LIVE ADOPT WARNING] Could not cancel old order {order_id} for {tradingsymbol}: {exc}. Check the broker terminal.")
+    if cancelled:
+        print(f"[LIVE ADOPT] Cancelled previous session's pending SELL order(s) for {tradingsymbol}: {', '.join(cancelled)}")
+
+    sl_points = get_dynamic_emergency_sl_points(entry_price)
+    stop_price = round(max(0.05, safe_float(entry_price, 0.0) - sl_points), 1)
+    out = {
+        "emergency_sl_order_id": "",
+        "emergency_sl_price": stop_price,
+        "emergency_sl_trigger_price": stop_price,
+        "emergency_sl_pct_used": sl_points,
+        "trailing_stop_price": stop_price,
+        "adopt_cancelled_order_ids": ",".join(cancelled),
+    }
+    if safe_float(entry_price, 0.0) <= 0 or safe_int(qty, 0) <= 0:
+        return out
+    try:
+        sl_meta = place_emergency_sl_order(kite, tradingsymbol, int(qty), float(entry_price))
+        if sl_meta:
+            out.update(sl_meta)
+            out["trailing_stop_price"] = safe_float(sl_meta.get("emergency_sl_price"), stop_price)
+            print(f"[LIVE ADOPT] Placed broker stop for {tradingsymbol}: qty={qty} stop={out['emergency_sl_price']} "
+                  f"order_id={out['emergency_sl_order_id']}")
+    except Exception as exc:
+        print(f"[LIVE ADOPT WARNING] Could not place a broker stop for {tradingsymbol}: {exc}. "
+              f"Software stop at {stop_price} stays active; check the broker terminal.")
+    return out
+
+
 def sync_broker_position_state(kite: KiteConnect, broker_entry: Dict) -> Dict:
     if not broker_entry:
         return {}
@@ -3446,7 +3513,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 "emergency_sl_pct_used": safe_float(FIXED_SL_POINTS, 50.0),
                 "emergency_sl_price": np.nan,
                 "emergency_sl_trigger_price": np.nan,
-                "emergency_sl_order_id": "",
+                "emergency_sl_order_id": "",   # replaced below by rearm_adopted_position_protection
                 "entry_order_id": entry_order_id,
                 "entry_order_status": "COMPLETE" if entry_order_id else "ADOPTED",
                 "entry_broker_time": entry_time,
@@ -3458,6 +3525,8 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 "broker_open_qty": qty,
                 "manual_or_broker_exit_detected": False,
             }
+            # Cancel the previous session's working stop/exit for this symbol and arm a fresh stop.
+            adopted_entry.update(rearm_adopted_position_protection(kite, symbol, qty, entry_price, orders_cache))
             live_state["broker_positions"][event_id] = adopted_entry
             adopted_count += 1
 
