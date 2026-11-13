@@ -633,6 +633,38 @@ class TrailOnCloseLiveTests(StrategyTestCase):
             self.assertEqual(m.paper_candle_check_stop(None, "CE", ts, True), 0.0)
 
 
+class PapertradeNiftySummaryTests(StrategyTestCase):
+    """Paper/live Excel summary: NIFTY prev close, open, high/low (+ times), close, change."""
+
+    def test_summary_from_spot_candles(self):
+        for m in self.each_module():
+            ts = m.pd.date_range("2026-11-13 09:15", periods=4, freq="min", tz=m.IST)
+            spot = m.pd.DataFrame({"ts": ts, "open": [25080.0, 25060, 25050, 25040],
+                                   "high": [25095.0, 25070, 25060, 25050], "low": [25055.0, 25040, 24990.4, 25010],
+                                   "close": [25062.0, 25052, 25041, 25020]})
+            out = m.papertrade_nifty_summary(spot, {"nifty_prev_close": 25170.35, "nifty_day_open": 25081.0})
+            self.assertEqual(out, {
+                "nifty_prev_close": 25170, "nifty_open": 25081, "nifty_high": 25095, "nifty_high_time": "09:15",
+                "nifty_low": 24990, "nifty_low_time": "09:17", "nifty_close": 25020,
+                "nifty_change": "-150 pts (-0.60%)",
+            })
+
+    def test_missing_data_gives_blanks(self):
+        for m in self.each_module():
+            out = m.papertrade_nifty_summary(m.pd.DataFrame(), {"nifty_prev_close": 25170.35})
+            self.assertEqual(out["nifty_prev_close"], 25170)
+            self.assertEqual({out[k] for k in out if k != "nifty_prev_close"}, {""})
+            self.assertEqual(set(m.papertrade_nifty_summary(None)), set(m.PAPERTRADE_NIFTY_SUMMARY_KEYS))
+
+    def test_written_to_the_summary_sheet(self):
+        for m in self.each_module():
+            ctx = {"nifty_open": 25081, "nifty_high": 25095, "nifty_high_time": "09:15", "gap_type": "GAP_DOWN"}
+            df = m.build_papertrade_summary_df([], market_context=ctx)
+            values = dict(zip(df["metric"], df["value"]))
+            self.assertEqual((values["nifty_open"], values["nifty_high_time"], values["gap_type"]), (25081, "09:15", "GAP_DOWN"))
+            self.assertEqual(values["nifty_low"], "")
+
+
 class GiftNiftyTests(StrategyTestCase):
     class OkKite:
         def __init__(self):

@@ -2535,6 +2535,58 @@ def to_excel_safe_df(rows: List[Dict]) -> pd.DataFrame:
     return df
 
 
+PAPERTRADE_NIFTY_SUMMARY_KEYS = (
+    "nifty_prev_close", "nifty_open", "nifty_high", "nifty_high_time",
+    "nifty_low", "nifty_low_time", "nifty_close", "nifty_change",
+)
+
+
+def papertrade_nifty_summary(spot_df: Optional[pd.DataFrame], attrs: Optional[Dict] = None) -> Dict[str, object]:
+    """NIFTY day context for a paper/live Excel summary, from the session's 1-minute spot candles.
+
+    Same fields the Log Files "update gap summary" button fetches from the broker:
+    prev close, open, high/low with their IST times, close and change. The open is the
+    real day open (attrs nifty_day_open) when known. Values cover the candles so far,
+    so the final save after the close holds the full day. Missing values are "".
+    """
+    attrs = attrs or {}
+    out: Dict[str, object] = {key: "" for key in PAPERTRADE_NIFTY_SUMMARY_KEYS}
+    prev_close = safe_float(attrs.get("nifty_prev_close"), 0.0)
+    if prev_close > 0:
+        out["nifty_prev_close"] = int(round(prev_close))
+    if spot_df is None or spot_df.empty or not {"ts", "open", "high", "low", "close"}.issubset(spot_df.columns):
+        return out
+    spot = spot_df.sort_values("ts").reset_index(drop=True)
+
+    def hhmm(value) -> str:
+        try:
+            ts = pd.Timestamp(value)
+            ts = ts.tz_localize(IST) if ts.tzinfo is None else ts.tz_convert(IST)
+            return ts.strftime("%H:%M")
+        except Exception:
+            return ""
+
+    day_open = safe_float(attrs.get("nifty_day_open"), 0.0) or safe_float(spot.iloc[0]["open"], 0.0)
+    high_idx = spot["high"].astype(float).idxmax()
+    low_idx = spot["low"].astype(float).idxmin()
+    day_high, day_low = float(spot.at[high_idx, "high"]), float(spot.at[low_idx, "low"])
+    day_close = safe_float(spot.iloc[-1]["close"], 0.0)
+    if day_open > 0:
+        out["nifty_open"] = int(round(day_open))
+    if day_high > 0:
+        out["nifty_high"], out["nifty_high_time"] = int(round(day_high)), hhmm(spot.at[high_idx, "ts"])
+    if day_low > 0:
+        out["nifty_low"], out["nifty_low_time"] = int(round(day_low)), hhmm(spot.at[low_idx, "ts"])
+    if day_close > 0:
+        out["nifty_close"] = int(round(day_close))
+        if prev_close > 0:
+            chg_pts = day_close - prev_close
+            chg_pct = chg_pts / prev_close * 100.0
+            sign = "+" if chg_pts >= 0 else ""
+            out["nifty_change"] = f"{sign}{chg_pts:.0f} pts ({sign}{chg_pct:.2f}%)"
+    return out
+
+
 def build_papertrade_summary_df(
     live_trade_events: List[Dict],
     guard_stop_reason: str = "",
@@ -2580,6 +2632,8 @@ def build_papertrade_summary_df(
     summary_rows = [
         {"metric": "run_mode", "value": str(run_mode)},
         {"metric": "script_name", "value": get_running_script_name()},
+        # NIFTY day context from the session's spot candles (trade rows hold it as of their entry).
+        *[{"metric": key, "value": fallback_context.get(key, "")} for key in PAPERTRADE_NIFTY_SUMMARY_KEYS],
         {"metric": "gap_type", "value": context_value("gap_type")},
         {"metric": "gap_points", "value": context_value("gap_points")},
         {"metric": "gap_pct", "value": context_value("gap_pct")},
@@ -2792,6 +2846,7 @@ def export_papertrade_events_to_excel(trade_date: str, ce_symbol: str, pe_symbol
             for key in ["gap_type", "gap_points", "gap_pct", "cpr_pivot", "cpr_bc", "cpr_tc", "cpr_width", "cpr_width_pct", "cpr_type"]:
                 if key in debug_day.attrs:
                     summary_market_context[key] = debug_day.attrs.get(key, "")
+            summary_market_context.update(debug_day.attrs.get("papertrade_nifty_summary") or {})
     except Exception:
         summary_market_context = {}
 
@@ -4588,7 +4643,13 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             day.attrs[k] = v
         # Real day open and unrounded prev-day OHLC (overrides the rounded display value).
         day.attrs.update(live_state.get("market_context_attrs") or {})
-        live_state["last_day_debug_df"] = day.copy()
+        debug_copy = day.copy()
+        try:
+            # Excel summary only: NIFTY open/high/low/close so far, from the raw spot candles (from 09:15).
+            debug_copy.attrs = {**day.attrs, "papertrade_nifty_summary": papertrade_nifty_summary(spot_df, day.attrs)}
+        except Exception as nifty_exc:
+            print(f"[NIFTY SUMMARY WARNING] {nifty_exc}")
+        live_state["last_day_debug_df"] = debug_copy
         paper_position_active = execution_mode == "PAPERTRADE_LIVE" and live_state.get("active_order_event_id") is not None
         previous_paper_open = None
         if execution_mode == "PAPERTRADE_LIVE" and isinstance(live_state.get("final_trades"), pd.DataFrame):
