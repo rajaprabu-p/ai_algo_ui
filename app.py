@@ -1826,6 +1826,45 @@ def today_paper_trades(log_dir: str, variant: str, today: str) -> list:
     return trades
 
 
+def _card_trade(t: dict) -> dict:
+    """A result-file trade in the Today card's shape (time = exit HH:MM)."""
+    text = str(t.get("exit_time") or "")
+    return {"time": text[11:16] if len(text) >= 16 else text[:5], "side": t["side"], "symbol": t["symbol"],
+            "entry": t.get("entry_price", 0.0), "exit": t.get("exit_price", 0.0),
+            "reason": t["exit_reason"], "pnl_points": t.get("pnl_points", 0.0), "pnl_rs": t["pnl_rs"]}
+
+
+def today_backtest_summary(log_dir: str, variant: str, today: str):
+    """Today's backtest result for one variant from the newest backtest Excel of today's date, or None.
+
+    Only the newest file counts (several runs with other settings would double up).
+    P&L is gross, like the paper line on the card.
+    """
+    newest, newest_mtime = None, -1.0
+    try:
+        names = os.listdir(log_dir)
+    except OSError:
+        return None
+    for name in names:
+        info = classify_result_file(name)
+        if not info or info["source"] != "backtest" or info["variant"] != variant or info["date"] != today:
+            continue
+        path = os.path.join(log_dir, name)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime > newest_mtime:
+            newest, newest_mtime = (path, info), mtime
+    if newest is None:
+        return None
+    path, info = newest
+    trades = sorted(_read_result_file(path, "backtest")["trades"], key=lambda t: t.get("exit_time") or "")
+    rows = [_card_trade(t) for t in trades]
+    return {"trades": rows, "trade_count": len(rows), "total_rs": round(sum(t["pnl_rs"] for t in rows), 2),
+            "settings": info["settings"], "run_at": datetime.fromtimestamp(newest_mtime, IST).strftime("%H:%M")}
+
+
 def merge_today_paper_excel(summary: dict, excel_trades: list) -> dict:
     """Use the paper Excel trades for the Today card's closed trades (the log may hold a backtest run).
 
@@ -1836,14 +1875,7 @@ def merge_today_paper_excel(summary: dict, excel_trades: list) -> dict:
     if not excel_trades or len(summary.get("trades") or []) > len(excel_trades):
         return summary
 
-    def hhmm(value):
-        text = str(value or "")
-        return text[11:16] if len(text) >= 16 else text[:5]
-
-    trades = [{"time": hhmm(t.get("exit_time")), "side": t["side"], "symbol": t["symbol"],
-               "entry": t.get("entry_price", 0.0), "exit": t.get("exit_price", 0.0),
-               "reason": t["exit_reason"], "pnl_points": t.get("pnl_points", 0.0), "pnl_rs": t["pnl_rs"]}
-              for t in excel_trades]
+    trades = [_card_trade(t) for t in excel_trades]
     realized = round(sum(t["pnl_rs"] for t in trades), 2)
     unrealized = summary.get("unrealized_rs", 0.0) if summary.get("open_position") else 0.0
     out = dict(summary)
@@ -1908,6 +1940,10 @@ def api_today():
             pass
         summary = merge_today_paper_excel(summary, today_paper_trades(LOGS_DIR, name, today))
         strategies[name] = {"running": running, "mode": read_mode(name) if running else "", "log_mode": log_mode, **summary}
+        try:
+            strategies[name]["backtest"] = today_backtest_summary(LOGS_DIR, name, today)
+        except Exception:
+            strategies[name]["backtest"] = None
 
     markers = {}
     for name in TODAY_STRATEGIES:
@@ -1929,7 +1965,9 @@ def api_today():
             with open(os.path.join(PARITY_DIR, reports[-1]), "r", encoding="utf-8") as f:
                 report = json.load(f)
             parity = {"trade_date": report.get("trade_date"), "checked_at": report.get("checked_at"),
-                      "variants": {v: {"verdict": r.get("verdict"), "issues": (r.get("issues") or [])[:6]}
+                      "variants": {v: {"verdict": r.get("verdict"), "issues": (r.get("issues") or [])[:6],
+                                       "drifts": (r.get("drifts") or [])[:6],
+                                       "max_price_drift": r.get("max_price_drift") or 0}
                                    for v, r in (report.get("variants") or {}).items()}}
     except Exception:
         parity = None

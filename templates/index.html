@@ -1304,6 +1304,8 @@
         if(a.last_check) aRows.push(['Last check', a.last_check.slice(11), 'today-muted']);
         cards.push(todayCard('Paper auto-start', aRows));
 
+        let todayLabel = j.date || '';
+        try { if(todayLabel) todayLabel = new Date(todayLabel + 'T00:00').toLocaleDateString(undefined, {day: 'numeric', month: 'short'}); } catch(e) {}
         Object.entries(j.strategies || {}).forEach(([name, s]) => {
           const rows = [['', s.running ? ('Running' + (s.mode ? ' (' + s.mode + ')' : '')) : 'Not running',
                          s.running ? 'today-ok' : 'today-muted']];
@@ -1325,9 +1327,21 @@
             Number(t.exit).toFixed(2) + ' ' + todayRs(t.pnl_rs) + ' (' + t.reason + ')', t.pnl_rs >= 0 ? 'today-ok' : 'today-bad']);
           if(s.stopped_by) items.push(['Stopped by', s.stopped_by, 'today-muted']);
           rows.push({fold: 'trades-' + name, items,
-            summary: ["Today's P&L", todayRs(s.total_rs) + ' · Trades: ' + (s.trade_count || 0),
+            summary: ['Papertrade P&L', todayRs(s.total_rs) + ' · Trades: ' + (s.trade_count || 0),
                       s.total_rs > 0 ? 'today-ok' : (s.total_rs < 0 ? 'today-bad' : 'today-muted')]});
-          cards.push(todayCard(name, rows));
+          // Today's backtest (newest backtest Excel of today's date), gross like the paper line.
+          const bt = s.backtest;
+          if(bt){
+            const btItems = (bt.trades || []).map(t => ['', t.time + ' ' + t.side + ' ' + Number(t.entry).toFixed(2) + ' → ' +
+              Number(t.exit).toFixed(2) + ' ' + todayRs(t.pnl_rs) + ' (' + t.reason + ')', t.pnl_rs >= 0 ? 'today-ok' : 'today-bad']);
+            btItems.push(['Run', (bt.run_at || '') + ' · ' + (bt.settings || ''), 'today-muted']);
+            rows.push({fold: 'backtest-' + name, items: btItems,
+              summary: ['Backtest P&L', todayRs(bt.total_rs) + ' · Trades: ' + (bt.trade_count || 0),
+                        bt.total_rs > 0 ? 'today-ok' : (bt.total_rs < 0 ? 'today-bad' : 'today-muted')]});
+          } else {
+            rows.push(['Backtest', 'not run for today yet', 'today-muted']);
+          }
+          cards.push(todayCard(name + (todayLabel ? ' · ' + todayLabel : ''), rows));
         });
 
         const d = j.download;
@@ -1343,13 +1357,20 @@
 
         const par = j.parity;
         if(par){
-          // One line per variant (verdict + issue count); the issues fold under it.
+          // One line per variant: verdict + counts. Issues are different decisions;
+          // drifts are the same trade with a different fill (price/time), shown lighter.
+          // A drift over 5 pts turns the line amber.
           const rows = [];
+          const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
           Object.entries(par.variants || {}).forEach(([v, r]) => {
-            const [pLabel, pCls] = PARITY_LABELS[r.verdict] || [r.verdict, 'today-muted'];
+            let [pLabel, pCls] = PARITY_LABELS[r.verdict] || [r.verdict, 'today-muted'];
             const issues = r.issues || [];
-            rows.push({fold: 'parity-' + v, items: issues.map(issue => ['', issue, 'today-muted']),
-              summary: [v, pLabel + (issues.length ? ` (${issues.length} issue${issues.length === 1 ? '' : 's'})` : ''), pCls]});
+            const drifts = r.drifts || [];
+            const counts = [issues.length ? plural(issues.length, 'issue') : '', drifts.length ? plural(drifts.length, 'drift') : ''].filter(Boolean);
+            if(pCls === 'today-ok' && Number(r.max_price_drift || 0) > 5) pCls = 'today-warn';
+            rows.push({fold: 'parity-' + v,
+              items: issues.map(issue => ['', issue, '']).concat(drifts.map(d => ['', '~ ' + d, 'today-muted'])),
+              summary: [v, pLabel + (counts.length ? ` (${counts.join(', ')})` : ''), pCls]});
           });
           let dateLabel = par.trade_date || '';
           try { if(dateLabel) dateLabel = new Date(dateLabel + 'T00:00').toLocaleDateString(undefined, {day: 'numeric', month: 'short'}); } catch(e) {}

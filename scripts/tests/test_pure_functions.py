@@ -613,6 +613,25 @@ class TrailOnCloseLiveTests(StrategyTestCase):
         self.assertGreater(on_high, 173.70)   # the high arms +25 -> lock
         self.assertEqual(on_close, 173.70)    # the close does not
 
+    def test_close_armed_stop_skips_its_own_candle(self):
+        # 13 Nov v30 paper: the 09:56 close armed +25 -> stop 200 (entry 185); the 09:56
+        # candle's low (~199) must be tested against the stop before that raise (170).
+        for m in self.each_module():
+            ts = m.pd.Timestamp("2026-11-13 09:56", tz=m.IST)
+            arm = m.close_arm_updates({}, {}, ts, 170.0, 200.0)
+            self.assertEqual(arm, {"close_arm_candle": "2026-11-13 09:56", "stop_before_close_arm": 170.0})
+            # a later tick after the same close keeps the first 'before' value
+            self.assertEqual(m.close_arm_updates(arm, {}, ts, 200.0, 205.0)["stop_before_close_arm"], 170.0)
+            self.assertEqual(m.close_arm_updates({}, {}, ts, 200.0, 200.0), {})   # no raise
+            prev = {"side": "CE", "trailing_stop_price": 200.0, **arm}
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", ts, True), 170.0)
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", "2026-11-13 09:56:00+05:30", True), 170.0)
+            # next candle, trailing on highs, or another side -> the raised stop / nothing
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", ts + m.pd.Timedelta(minutes=1), True), 200.0)
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", ts, False), 200.0)
+            self.assertEqual(m.paper_candle_check_stop(prev, "PE", ts, True), 0.0)
+            self.assertEqual(m.paper_candle_check_stop(None, "CE", ts, True), 0.0)
+
 
 class GiftNiftyTests(StrategyTestCase):
     class OkKite:

@@ -110,6 +110,34 @@ class RunModeAndPaperExcelTests(unittest.TestCase):
         self.assertEqual((merged["realized_rs"], merged["total_rs"]), (3250.0, 2730.0))
         self.assertIs(webapp.merge_today_paper_excel(log, []), log)  # no Excel yet -> log as before
 
+    def test_today_backtest_summary_uses_newest_file_of_today(self):
+        import os
+        import tempfile
+        import pandas as pd
+
+        def write(folder, name, trades, mtime):
+            path = Path(folder) / name
+            with pd.ExcelWriter(path) as xw:
+                pd.DataFrame(trades).to_excel(xw, sheet_name="trades", index=False)
+            os.utime(path, (mtime, mtime))
+
+        t = {"entry_time": "2026-11-13 09:41:00+05:30", "exit_time": "2026-11-13 09:58:00+05:30", "side": "CE",
+             "option_symbol": "NIFTY26N1725150CE", "entry_price": 186.0, "exit_price": 200.0,
+             "exit_reason": "TRAILING_STOP_HIT", "pnl_points": 14.0, "pnl_rs": 910.0, "net_pnl_rs": 836.0}
+        loss = dict(t, entry_time="2026-11-13 09:27:00+05:30", exit_time="2026-11-13 09:30:00+05:30", side="PE",
+                    option_symbol="NIFTY26N1725100PE", entry_price=166.1, exit_price=140.1,
+                    exit_reason="EMERGENCY_SL_HIT", pnl_points=-26.0, pnl_rs=-1690.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(webapp.today_backtest_summary(tmp, "v30", "2026-11-13"))
+            write(tmp, "backtest_13112026_mtf5min_mfe_max2_sl25_v30_csv.xlsx", [t, loss], 2_000_000_000)
+            write(tmp, "backtest_13112026_mtf5min_mfe_max3_sl25_v30_csv.xlsx", [t], 1_900_000_000)   # older run
+            write(tmp, "backtest_12112026_mtf5min_mfe_max2_sl25_v30_csv.xlsx", [t], 2_100_000_000)   # other day
+            write(tmp, "backtest_13112026_mtf5min_mfe_max2_sl25_v28_csv.xlsx", [t], 2_100_000_000)   # other variant
+            bt = webapp.today_backtest_summary(tmp, "v30", "2026-11-13")
+        self.assertEqual((bt["trade_count"], bt["total_rs"]), (2, -780.0))
+        self.assertEqual([r["time"] for r in bt["trades"]], ["09:30", "09:58"])
+        self.assertEqual(bt["settings"], "mtf5min_mfe_max2_sl25 (csv)")
+
 
 class AutostartParserTests(unittest.TestCase):
     def test_statuses(self):

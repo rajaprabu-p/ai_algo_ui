@@ -38,6 +38,18 @@ class CompareTests(unittest.TestCase):
         r = pvb.compare(paper, bt)
         self.assertEqual(r["verdict"], "MATCH", r["issues"])
         self.assertEqual(r["pairs"][0]["entry_minutes_apart"], 2.0)
+        self.assertEqual(r["drifts"], ["PE 09:27: entry 09:27 vs backtest 09:25"])
+
+    def test_fill_drifts_do_not_change_the_verdict(self):
+        # 13 Nov v30: same trade, paper exited 2 min early at 199.20; backtest 200.00 after 1 pt slippage.
+        paper = pd.DataFrame([trade("CE", "09:41", "09:56", 185.0, 199.2, "TRAILING_STOP_HIT")])
+        bt = pd.DataFrame([trade("CE", "09:41", "09:58", 186.0, 200.0, "TRAILING_STOP_HIT")])
+        r = pvb.compare(paper, bt, entry_slip=1.0, exit_slip=1.0)
+        self.assertEqual(r["verdict"], "MATCH", r["issues"])
+        self.assertEqual(r["drifts"], ["CE 09:41: exit 09:56 vs backtest 09:58"])   # -1.80 is within 2.5
+        r = pvb.compare(paper.assign(exit_price=193.15), bt, entry_slip=1.0, exit_slip=1.0)
+        self.assertIn("CE 09:41: exit price -7.85 pts", r["drifts"])
+        self.assertEqual(r["max_price_drift"], 7.85)
 
     def test_differences_are_reported(self):
         paper = pd.DataFrame([trade("CE", "09:25", "09:40", 150.0, 175.0, "TRAILING_STOP_HIT")])
@@ -45,8 +57,11 @@ class CompareTests(unittest.TestCase):
         r = pvb.compare(paper, bt)
         self.assertEqual(r["verdict"], "DIFFERENT")
         text = " | ".join(r["issues"])
-        for expected in ("different contract", "exit reason differs", "exit price differs", "exit time differs"):
+        for expected in ("different contract", "exit reason differs"):
             self.assertIn(expected, text)
+        drifts = " | ".join(r["drifts"])
+        for expected in ("exit price +50.00 pts", "exit 09:40 vs backtest 10:05"):
+            self.assertIn(expected, drifts)
 
     def test_unmatched_trades_on_either_side(self):
         paper = pd.DataFrame([trade("CE", "09:25", "09:40", 150.0, 175.0, "TRAILING_STOP_HIT")])

@@ -11,6 +11,13 @@ strategy variant it:
      entry/exit times, exit reasons and prices. The backtest's configured slippage
      is removed first, because paper trading fills at the signal price.
 
+Two kinds of findings:
+  * issues: a different decision (a trade on one side only, another contract, another
+    exit reason, settings that differ). Any issue makes the verdict DIFFERENT.
+  * drifts: same decision, different fill (entry/exit price beyond
+    PRICE_TOLERANCE_POINTS, entry/exit time beyond the minute tolerances). Listed
+    separately; they do not change the verdict.
+
 Verdicts: MATCH, DIFFERENT, NO_PAPER_TRADES (paper did not run or did not trade
 while the backtest did), NO_TRADES (neither traded), NO_DATA (no downloaded
 option files yet), ERROR. Reports go to logs/parity/parity_<date>.json and .txt.
@@ -44,8 +51,9 @@ REPORT_DIR = PROJECT_ROOT / "logs" / "parity"
 IST = ZoneInfo("Asia/Kolkata")
 VARIANTS = {"v28": "v28_strategy_main.py", "v30": "v30_strategy_main.py"}
 ENTRY_MATCH_MINUTES = 3        # paper and backtest entries this close are the same trade
-PRICE_TOLERANCE_POINTS = 1.5   # price differences above this (after removing slippage) are flagged
-EXIT_TIME_TOLERANCE_MINUTES = 3
+PRICE_TOLERANCE_POINTS = 2.5   # price drifts above this (after removing slippage) are listed
+ENTRY_TIME_TOLERANCE_MINUTES = 1
+EXIT_TIME_TOLERANCE_MINUTES = 1   # exits a candle or more apart are listed (e.g. a stop applied early)
 BACKTEST_TIMEOUT_SECONDS = 900
 
 
@@ -174,14 +182,17 @@ def backtest_slippage(metrics: dict) -> tuple[float, float]:
 def compare(paper: pd.DataFrame, backtest: pd.DataFrame, entry_slip: float = 0.0, exit_slip: float = 0.0) -> dict:
     """Pair trades and list the differences. Pure function (no I/O) so it can be unit-tested."""
     if paper.empty and backtest.empty:
-        return {"verdict": "NO_TRADES", "pairs": [], "only_paper": [], "only_backtest": [], "issues": []}
+        return {"verdict": "NO_TRADES", "pairs": [], "only_paper": [], "only_backtest": [], "issues": [],
+                "drifts": [], "max_price_drift": 0.0}
     if paper.empty:
         return {"verdict": "NO_PAPER_TRADES", "pairs": [], "only_paper": [],
                 "only_backtest": [_trade_row(t) for _, t in backtest.iterrows()],
-                "issues": ["backtest traded but no paper trades were found for this day"]}
+                "issues": ["backtest traded but no paper trades were found for this day"],
+                "drifts": [], "max_price_drift": 0.0}
 
     used_bt: set[int] = set()
-    pairs, only_paper, issues = [], [], []
+    pairs, only_paper, issues, drifts = [], [], [], []
+    max_price_drift = 0.0
     for _, p in paper.iterrows():
         best, best_gap = None, None
         for j, b in backtest.iterrows():
@@ -216,17 +227,20 @@ def compare(paper: pd.DataFrame, backtest: pd.DataFrame, entry_slip: float = 0.0
             issues.append(f"{tag}: different contract (paper {p.get('option_symbol')}, backtest {b.get('option_symbol')})")
         if not pair["same_exit_reason"]:
             issues.append(f"{tag}: exit reason differs (paper {p.get('exit_reason')}, backtest {b.get('exit_reason')})")
-        if abs(pair["entry_price_diff"]) > PRICE_TOLERANCE_POINTS:
-            issues.append(f"{tag}: entry price differs by {pair['entry_price_diff']:+.2f} pts")
-        if abs(pair["exit_price_diff"]) > PRICE_TOLERANCE_POINTS:
-            issues.append(f"{tag}: exit price differs by {pair['exit_price_diff']:+.2f} pts")
+        if pair["entry_minutes_apart"] > ENTRY_TIME_TOLERANCE_MINUTES:
+            drifts.append(f"{tag}: entry {p['entry_time']:%H:%M} vs backtest {b['entry_time']:%H:%M}")
         if pair["exit_minutes_apart"] is not None and pair["exit_minutes_apart"] > EXIT_TIME_TOLERANCE_MINUTES:
-            issues.append(f"{tag}: exit time differs by {pair['exit_minutes_apart']:.0f} min")
+            drifts.append(f"{tag}: exit {p['exit_time']:%H:%M} vs backtest {b['exit_time']:%H:%M}")
+        for label, key in (("entry", "entry_price_diff"), ("exit", "exit_price_diff")):
+            if abs(pair[key]) > PRICE_TOLERANCE_POINTS:
+                drifts.append(f"{tag}: {label} price {pair[key]:+.2f} pts")
+                max_price_drift = max(max_price_drift, abs(pair[key]))
     only_backtest = [_trade_row(b) for j, b in backtest.iterrows() if j not in used_bt]
     for t in only_backtest:
         issues.append(f"backtest {t['side']} at {t['entry_time'][11:16]} has no matching paper trade")
     return {"verdict": "DIFFERENT" if issues else "MATCH", "pairs": pairs,
-            "only_paper": only_paper, "only_backtest": only_backtest, "issues": issues}
+            "only_paper": only_paper, "only_backtest": only_backtest, "issues": issues,
+            "drifts": drifts, "max_price_drift": round(max_price_drift, 2)}
 
 
 def _trade_row(t) -> dict:
@@ -250,6 +264,7 @@ def write_report(trade_day: date, results: dict) -> Path:
     for variant, r in results.items():
         lines.append(f"\n[{variant}] {r['verdict']}  (paper trades {r.get('paper_trades', 0)}, backtest trades {r.get('backtest_trades', 0)})")
         lines += [f"  - {issue}" for issue in r.get("issues", [])]
+        lines += [f"  ~ drift: {d}" for d in r.get("drifts", [])]
     (REPORT_DIR / f"parity_{trade_day.isoformat()}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return json_path
 
@@ -316,6 +331,8 @@ def main() -> int:
         log(f"{variant}: {result['verdict']} (paper {len(paper)} trade(s) from {len(files)} file(s), backtest {len(backtest)})")
         for issue in result["issues"]:
             log(f"{variant}:   - {issue}")
+        for drift in result["drifts"]:
+            log(f"{variant}:   ~ drift: {drift}")
         if result["verdict"] == "DIFFERENT":
             worst = 1
     path = write_report(trade_day, results)

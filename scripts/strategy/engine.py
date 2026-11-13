@@ -2037,6 +2037,60 @@ def last_completed_option_close(live_state: dict, side: str, option_symbol: str 
     return safe_float(rows[-1].get("close"), 0.0) if rows else 0.0
 
 
+def last_completed_option_candle_ts(live_state: dict, side: str):
+    """Start time of the newest completed CE/PE candle (the one last_completed_option_close reads), or None."""
+    rows = live_state.get("ce_rows" if str(side or "").upper() == "CE" else "pe_rows") or []
+    return rows[-1].get("ts") if rows else None
+
+
+def candle_minute_key(value) -> str:
+    """'YYYY-MM-DD HH:MM' in IST for a candle timestamp, '' when unknown (for comparing candles)."""
+    if value is None or value == "":
+        return ""
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return ""
+    if pd.isna(ts):
+        return ""
+    ts = ts.tz_localize(IST) if ts.tzinfo is None else ts.tz_convert(IST)
+    return ts.strftime("%Y-%m-%d %H:%M")
+
+
+def close_arm_updates(position: dict, persisted: dict, candle_ts, stop_before: float, stop_after: float) -> dict:
+    """TRAIL_ON_CLOSE bookkeeping when a completed candle's close raises the paper stop.
+
+    Remembers which candle armed the stop and the stop in place before it, so the
+    end-of-candle check tests that same candle against the earlier stop (a stop armed
+    by a close applies from the next candle, as in the backtest). Several ticks after
+    the same close keep the first 'before' value.
+    """
+    key = candle_minute_key(candle_ts)
+    if not key or safe_float(stop_after, 0.0) <= safe_float(stop_before, 0.0):
+        return {}
+    for source in (position or {}, persisted or {}):
+        if source.get("close_arm_candle") == key:
+            return {"close_arm_candle": key, "stop_before_close_arm": source.get("stop_before_close_arm")}
+    return {"close_arm_candle": key, "stop_before_close_arm": round(safe_float(stop_before, 0.0), 2)}
+
+
+def paper_candle_check_stop(previous_open, side: str, candle_ts, trail_on_close: bool) -> float:
+    """Stop the end-of-candle paper check tests the newest candle's low against.
+
+    That is the previous rebuild's stop, except under TRAIL_ON_CLOSE when the newest
+    candle's own close raised it: then the stop before that raise. 0.0 when unknown.
+    """
+    if not isinstance(previous_open, dict) or str(previous_open.get("side") or "").upper() != str(side or "").upper():
+        return 0.0
+    stop = safe_float(previous_open.get("trailing_stop_price"), 0.0)
+    if trail_on_close:
+        key = candle_minute_key(candle_ts)
+        before = safe_float(previous_open.get("stop_before_close_arm"), 0.0)
+        if key and previous_open.get("close_arm_candle") == key and before > 0:
+            stop = min(stop, before) if stop > 0 else before
+    return stop
+
+
 def ensure_trade_charges(trade: dict) -> dict:
     """Fill charges_rs / net_pnl_rs on a closed trade record that lacks them.
 
@@ -4682,12 +4736,13 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 emergency_stop = safe_float(paper_open.get("emergency_sl_price"), 0.0)
                 # Without a tick-triggered exit, test the newest candle against the stop
                 # in place when it opened (the previous rebuild's stop): a stop raised
-                # from this candle's high only applies from the next candle.
-                paper_prev_stop = (
-                    safe_float(previous_paper_open.get("trailing_stop_price"), 0.0)
-                    if isinstance(previous_paper_open, dict)
-                    and str(previous_paper_open.get("side") or "").upper() == paper_side
-                    else 0.0
+                # from this candle's high, or (TRAIL_ON_CLOSE) its close, only applies
+                # from the next candle.
+                paper_prev_stop = paper_candle_check_stop(
+                    previous_paper_open,
+                    paper_side,
+                    day.iloc[-1].get("ce_ts" if paper_side == "CE" else "pe_ts") or day.iloc[-1].get("spot_ts"),
+                    TRAIL_ON_CLOSE,
                 )
                 paper_stop = safe_float(
                     paper_pending.get("stop") if pending_matches else (paper_prev_stop or emergency_stop),
@@ -5648,6 +5703,10 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             min_trigger = None
         if min_trigger is not None and pnl_points_high < min_trigger and trailing_stop > option_ltp:
             trailing_stop = current_stop
+        if TRAIL_ON_CLOSE:
+            open_position.update(close_arm_updates(
+                open_position, persisted_open_position,
+                last_completed_option_candle_ts(live_state, side), current_stop, trailing_stop))
 
         open_position.update({
             "best_price": round(best_price, 2),
