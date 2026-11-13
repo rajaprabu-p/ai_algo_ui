@@ -158,6 +158,15 @@
     .cal-detail-title { font-weight: 600; font-size: 13px; }
     .cal-detail-close { border: 0; background: transparent; font-size: 16px; padding: 2px 6px; color: var(--text-secondary); }
     .cal-detail-table { overflow-x: auto; }
+    /* Compare view: click a day row to see both sides' trades under it. */
+    tr.cmp-day { cursor: pointer; }
+    tr.cmp-day:hover td, tr.cmp-day:focus-visible td { background: var(--grid); }
+    tr.cmp-day.selected td { background: var(--grid); font-weight: 600; }
+    tr.cmp-day-detail > td { padding: 6px 4px 10px; background: transparent; }
+    .cmp-side { margin: 4px 0 8px; }
+    .cmp-side-head { font-size: 12px; font-weight: 600; margin-bottom: 2px; display: flex; align-items: center; gap: 6px; }
+    .cmp-side-head .sw { display: inline-block; width: 12px; height: 3px; border-radius: 2px; }
+    .cmp-side table { font-size: 12px; }
     .cal-day.today { border-color: var(--axis); }
     .cal-day .n { color: var(--text-muted); font-size: 15px; }
     .cal-day .p { font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -719,6 +728,7 @@
 
     // ---- Compare view: v28 vs v30 on the same source and date range ----
     let view = 'single';
+    let cmpSelected = null;   // 'YYYY-MM-DD' whose trades are open under the side-by-side day table
     const CMP = [
       {variant: 'v28', color: () => css('--series-v28')},
       {variant: 'v30', color: () => css('--series-v30')},
@@ -976,12 +986,62 @@
       }).reverse();
       document.getElementById('cmp-days-sum').textContent =
         `${dates.length} day(s): ${A} better on ${aWins}, ${B} better on ${bWins}, same on ${same}`;
-      document.getElementById('cmp-days').replaceChildren(table([
+      const dayCols = [
         {label: 'Date', value: r => r.date}, {label: 'Day', value: r => r.weekday},
         {label: A, num: true, value: r => `${fmtRs(r.a)} (${r.ta})`, sign: r => r.a},
         {label: B, num: true, value: r => `${fmtRs(r.b)} (${r.tb})`, sign: r => r.b},
         {label: DIFF, num: true, value: r => fmtRs(r.b - r.a)},
-      ], dayRows));
+      ];
+      const dayTable = table(dayCols, dayRows);
+      if(cmpSelected && !byDate[0][cmpSelected] && !byDate[1][cmpSelected]) cmpSelected = null;
+      // Each row opens a detail row with both sides' trades for that day (click again to close).
+      const bodyRows = [...dayTable.tBodies[0].rows];
+      bodyRows.forEach((tr, i) => {
+        const r = dayRows[i];
+        tr.classList.add('cmp-day');
+        tr.tabIndex = 0;
+        tr.title = 'Show the trades of this day';
+        tr.setAttribute('aria-expanded', String(r.date === cmpSelected));
+        const toggle = () => { cmpSelected = cmpSelected === r.date ? null : r.date; renderCompare(items, opts); };
+        tr.addEventListener('click', toggle);
+        tr.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); toggle(); } });
+        if(r.date !== cmpSelected) return;
+        tr.classList.add('selected');
+        const detail = el('tr', {class: 'cmp-day-detail'});
+        const cell = el('td', {colspan: dayCols.length});
+        items.forEach((it, k) => cell.appendChild(compareDaySide(it, byDate[k][r.date])));
+        detail.appendChild(cell);
+        tr.after(detail);
+      });
+      document.getElementById('cmp-days').replaceChildren(dayTable);
+    }
+
+    // One side's trades for the selected day in the side-by-side table.
+    function compareDaySide(item, day){
+      const box = el('div', {class: 'cmp-side'});
+      const head = el('div', {class: 'cmp-side-head'});
+      head.appendChild(el('span', {class: 'sw', style: `background:${item.color}`}));
+      head.append(`${item.name} · ${day ? `${day.trades} trade${day.trades === 1 ? '' : 's'} · ` : ''}`);
+      if(day) head.appendChild(el('span', {class: day.pnl > 0 ? 'good' : day.pnl < 0 ? 'bad' : ''}, fmtRs(day.pnl)));
+      else head.append('no result for this day');
+      box.appendChild(head);
+      const rows = (day && day.trade_list) || [];
+      if(!day) return box;
+      if(!rows.length){ box.appendChild(el('div', {class: 'empty'}, 'No trades.')); return box; }
+      const px = v => (v === null || v === undefined || v === '' || isNaN(Number(v))) ? '—' : Number(v).toFixed(2);
+      const scroller = el('div', {class: 'cal-detail-table'});
+      scroller.appendChild(table([
+        {label: 'Entry', value: r => r.entry_time || '—'},
+        {label: 'Exit', value: r => r.exit_time || '—'},
+        {label: 'Side', value: r => r.side},
+        {label: 'Entry ₹', num: true, value: r => px(r.entry_price)},
+        {label: 'Exit ₹', num: true, value: r => px(r.exit_price)},
+        {label: 'Pts', num: true, value: r => px(r.pnl_points), sign: r => Number(r.pnl_points) || 0},
+        {label: 'P&L', num: true, value: r => fmtRs(r.pnl), sign: r => r.pnl},
+        {label: 'Exit reason', value: r => r.exit_reason},
+      ], rows));
+      box.appendChild(scroller);
+      return box;
     }
 
     function setView(next){
