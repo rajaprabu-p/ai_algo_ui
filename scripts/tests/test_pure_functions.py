@@ -720,10 +720,118 @@ class AdoptedPositionProtectionTests(StrategyTestCase):
             self.assertEqual((out["emergency_sl_order_id"], out["emergency_sl_price"], out["trailing_stop_price"]),
                              ("", 161.0, 161.0))
 
+    def test_keeps_a_raised_stop_from_the_previous_session(self):
+        for m in self.each_module():
+            kite = self.FakeKite()
+            orders = [dict(self.ORDERS[0], trigger_price=200.0)]          # old stop locked +14
+            with mock.patch("builtins.print"), mock.patch.object(m, "ENABLE_LIVE_ORDERS", True), \
+                    mock.patch.object(m, "ENABLE_EMERGENCY_SL_ORDER", True), mock.patch.object(m, "FIXED_SL_POINTS", 25):
+                out = m.rearm_adopted_position_protection(kite, "NIFTY26N1725150CE", 65, 186.0, orders)
+            self.assertEqual(kite.placed[0]["trigger_price"], 200.0)
+            self.assertEqual((out["trailing_stop_price"], out["emergency_sl_price"], out["broker_stop_raised"]),
+                             (200.0, 161.0, True))
+
     def test_own_pending_exit_order(self):
         for m in self.each_module():
             own = [o["order_id"] for o in self.ORDERS if m.is_own_pending_exit_order(o, "nifty26n1725150ce")]
             self.assertEqual(own, ["OLD-SL"])
+
+
+class BrokerStopFollowsTrailingTests(StrategyTestCase):
+    """LIVE_ORDER: the broker stop follows the trailing stop and is the exit."""
+
+    class FakeKite:
+        TRANSACTION_TYPE_SELL = "SELL"
+
+        def __init__(self, fail_modify=False):
+            self.modified, self.cancelled, self.placed, self.fail_modify = [], [], [], fail_modify
+
+        def modify_order(self, **params):
+            if self.fail_modify:
+                raise RuntimeError("Trigger price invalid")
+            self.modified.append(params)
+
+        def cancel_order(self, variety, order_id):
+            self.cancelled.append(order_id)
+
+        def orders(self):
+            return [{"order_id": oid, "status": "CANCELLED"} for oid in self.cancelled]
+
+        def order_history(self, order_id):
+            return []
+
+        def place_order(self, **params):
+            self.placed.append(params)
+            return "SL-2"
+
+    def entry(self, **kw):
+        base = {"option_symbol": "NIFTY26N1725150CE", "qty": 65, "broker_open_qty": 65,
+                "emergency_sl_order_id": "SL-1", "emergency_sl_order_status": "TRIGGER PENDING",
+                "emergency_sl_price": 160.0, "emergency_sl_trigger_price": 160.05}
+        base.update(kw)
+        return base
+
+    def test_raises_the_trigger_once_per_level(self):
+        for m in self.each_module():
+            kite = self.FakeKite()
+            with mock.patch("builtins.print"):
+                up = m.raise_broker_stop(kite, self.entry(), 200.0, 211.9)
+                self.assertEqual(kite.modified, [{"variety": "regular", "order_id": "SL-1", "order_type": "SL-M", "trigger_price": 200.0}])
+                self.assertEqual((up["emergency_sl_trigger_price"], up["broker_stop_modify_count"], up["broker_stop_raised"]),
+                                 (200.0, 1, True))
+                e = self.entry(**up)
+                self.assertEqual(m.raise_broker_stop(kite, e, 200.0, 212.0), {})        # same level: no change
+                self.assertEqual(m.raise_broker_stop(kite, e, 195.0, 212.0), {})        # never lowered
+                self.assertEqual(m.raise_broker_stop(kite, e, 205.0, 204.0), {})        # at/above the price: no
+                self.assertEqual(m.raise_broker_stop(kite, self.entry(emergency_sl_order_status="COMPLETE"), 200.0, 211.9), {})
+                self.assertEqual(len(kite.modified), 1)
+
+    def test_failed_change_is_not_retried_at_the_same_level(self):
+        for m in self.each_module():
+            kite = self.FakeKite(fail_modify=True)
+            with mock.patch("builtins.print"):
+                up = m.raise_broker_stop(kite, self.entry(), 200.0, 211.9)
+                self.assertEqual(up, {"broker_stop_failed_trigger": 200.0})
+                self.assertEqual(m.raise_broker_stop(kite, self.entry(**up), 200.0, 211.9), {})
+
+    def test_order_is_replaced_after_too_many_changes(self):
+        for m in self.each_module():
+            kite = self.FakeKite()
+            with mock.patch("builtins.print"), mock.patch.object(m, "BROKER_STOP_MAX_MODIFICATIONS", 20), \
+                    mock.patch.object(m.time, "sleep"):
+                up = m.raise_broker_stop(kite, self.entry(broker_stop_modify_count=20, emergency_sl_trigger_price=200.0), 205.0, 215.0)
+            self.assertEqual(kite.cancelled, ["SL-1"])
+            self.assertEqual((kite.placed[0]["order_type"], kite.placed[0]["trigger_price"], kite.placed[0]["quantity"]),
+                             ("SL-M", 205.0, 65))
+            self.assertEqual((up["emergency_sl_order_id"], up["broker_stop_modify_count"]), ("SL-2", 0))
+
+    def test_waits_for_the_broker_stop_then_falls_back(self):
+        for m in self.each_module():
+            e = self.entry(emergency_sl_trigger_price=200.0)
+            with mock.patch("builtins.print"):
+                wait, up = m.broker_stop_exit_pending(e, 200.0, 1000.0, grace_seconds=3.0)
+                self.assertTrue(wait)
+                wait, _ = m.broker_stop_exit_pending(dict(e, **up), 200.0, 1002.0, grace_seconds=3.0)
+                self.assertTrue(wait)
+                wait, _ = m.broker_stop_exit_pending(dict(e, **up), 200.0, 1003.5, grace_seconds=3.0)
+                self.assertFalse(wait)                                   # not filled in 3 s: software exit
+                # broker stop below this level (change failed) or not working: exit right away
+                self.assertFalse(m.broker_stop_exit_pending(self.entry(emergency_sl_trigger_price=160.05), 200.0, 1000.0)[0])
+                self.assertFalse(m.broker_stop_exit_pending(self.entry(emergency_sl_order_id=""), 160.0, 1000.0)[0])
+
+    def test_raised_stop_fill_is_a_trailing_exit(self):
+        for m in self.each_module():
+            class K:
+                def positions(self):
+                    return {"net": [], "day": []}
+
+                def orders(self):
+                    return [{"order_id": "SL-1", "status": "COMPLETE", "average_price": 199.5,
+                             "order_timestamp": "2026-11-13 09:58:00"}]
+
+            out = m.sync_broker_position_state(K(), self.entry(broker_stop_raised=True))
+            self.assertEqual((out["broker_exit_reason"], out["broker_exit_avg_price"]), ("TRAILING_STOP_HIT", 199.5))
+            self.assertEqual(m.sync_broker_position_state(K(), self.entry())["broker_exit_reason"], "EMERGENCY_SL_HIT")
 
 
 class GiftNiftyTests(StrategyTestCase):

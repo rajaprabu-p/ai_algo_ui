@@ -347,6 +347,12 @@ MARKET_TO_LIMIT_BUFFER_PCT = 0.5
 OPTION_TICK_SIZE = 0.05
 ENABLE_COVER_ORDER_ENTRY = False  # If True, place BUY as Cover Order (CO) with broker-attached SL trigger — CO not allowed for NFO
 ENABLE_EMERGENCY_SL_ORDER = True  # If True, place a separate SL order immediately after entry to act as a backstop in case of manual exit or broker issues
+# LIVE_ORDER: the broker stop follows the trailing stop and is the exit (it triggers at the
+# exchange and survives a crash). The software sells only if the broker stop has not filled
+# BROKER_STOP_FALLBACK_SECONDS after the price crossed the stop.
+BROKER_STOP_FOLLOWS_TRAILING = True
+BROKER_STOP_FALLBACK_SECONDS = 3.0
+BROKER_STOP_MAX_MODIFICATIONS = 20   # Zerodha limits changes per order; replace the order after this many
 BROKER_SYNC_POLL_SECONDS = 2.0
 BROKER_ORDER_POLL_RETRIES = 20
 BROKER_ORDER_POLL_INTERVAL_SECONDS = 1.0
@@ -921,6 +927,22 @@ def has_any_open_broker_position(kite: KiteConnect) -> bool:
     return False
 
 
+def place_sell_stop_order(kite: KiteConnect, tradingsymbol: str, qty: int, trigger_price: float) -> str:
+    """Broker-side SL-M SELL for an open long option position; returns the order id."""
+    return place_kite_order_with_market_protection(kite, dict(
+        variety=LIVE_ORDER_VARIETY,
+        exchange=OPTION_EXCHANGE,
+        tradingsymbol=tradingsymbol,
+        transaction_type=kite.TRANSACTION_TYPE_SELL,
+        quantity=int(qty),
+        product=LIVE_ORDER_PRODUCT,
+        order_type='SL-M',
+        trigger_price=round_to_tick(trigger_price, OPTION_TICK_SIZE),
+        validity='DAY',
+        tag=LIVE_ORDER_TAG,
+    ))
+
+
 def place_emergency_sl_order(kite: KiteConnect, tradingsymbol: str, qty: int, entry_price: float, entry_number: int = 1) -> Dict:
     if (not ENABLE_LIVE_ORDERS) or (not ENABLE_EMERGENCY_SL_ORDER):
         return {}
@@ -967,6 +989,74 @@ def is_own_pending_exit_order(order: Dict, tradingsymbol: str) -> bool:
     return LIVE_ORDER_TAG in tags
 
 
+def broker_stop_is_working(entry: Dict) -> bool:
+    """The position's broker stop order exists and is still pending (status read at the last sync)."""
+    return bool(str(entry.get("emergency_sl_order_id") or "").strip()) and \
+        normalize_order_status(entry.get("emergency_sl_order_status") or "TRIGGER PENDING") in PENDING_ORDER_STATUSES
+
+
+def raise_broker_stop(kite: KiteConnect, entry: Dict, stop_price: float, ltp: float) -> Dict:
+    """Move the broker stop's trigger up to the trailing stop. Returns the fields to merge.
+
+    Only raises, only when the broker stop is still working, never to a trigger at or above
+    the current price (the broker rejects that; the software exit covers it), and does not
+    retry a level that already failed. After BROKER_STOP_MAX_MODIFICATIONS changes the order
+    is cancelled and placed again (Zerodha limits changes per order).
+    """
+    if not BROKER_STOP_FOLLOWS_TRAILING or not broker_stop_is_working(entry):
+        return {}
+    desired = round_to_tick(stop_price, OPTION_TICK_SIZE) if safe_float(stop_price, 0.0) > 0 else 0.0
+    current = safe_float(entry.get("emergency_sl_trigger_price"), 0.0)
+    if desired <= 0 or desired <= current + OPTION_TICK_SIZE / 2:
+        return {}
+    if safe_float(ltp, 0.0) > 0 and desired >= safe_float(ltp, 0.0) - OPTION_TICK_SIZE / 2:
+        return {}
+    if safe_float(entry.get("broker_stop_failed_trigger"), 0.0) == desired:
+        return {}
+    order_id = str(entry.get("emergency_sl_order_id") or "").strip()
+    symbol = str(entry.get("option_symbol") or entry.get("entry_order_symbol") or "")
+    count = safe_int(entry.get("broker_stop_modify_count"), 0)
+    try:
+        if count >= safe_int(BROKER_STOP_MAX_MODIFICATIONS, 20):
+            qty = safe_int(entry.get("broker_open_qty") or entry.get("qty"), 0)
+            cancel_order_and_wait(kite, order_id)
+            new_id = place_sell_stop_order(kite, symbol, qty, desired)
+            print(f"[BROKER STOP] {symbol}: replaced stop order {order_id} -> {new_id} at trigger {desired:.2f} "
+                  f"(after {count} changes)")
+            return {"emergency_sl_order_id": new_id, "emergency_sl_order_status": "TRIGGER PENDING",
+                    "emergency_sl_trigger_price": desired, "broker_stop_modify_count": 0,
+                    "broker_stop_raised": True, "broker_stop_failed_trigger": 0.0}
+        kite.modify_order(variety=LIVE_ORDER_VARIETY, order_id=order_id, order_type="SL-M", trigger_price=desired)
+        print(f"[BROKER STOP] {symbol}: trigger {current:.2f} -> {desired:.2f} (order {order_id})")
+        return {"emergency_sl_trigger_price": desired, "broker_stop_modify_count": count + 1,
+                "broker_stop_raised": True, "broker_stop_failed_trigger": 0.0}
+    except Exception as exc:
+        print(f"[BROKER STOP WARNING] {symbol}: could not move the stop to {desired:.2f}: {exc}. "
+              "The software stop still exits at that level.")
+        return {"broker_stop_failed_trigger": desired}
+
+
+def broker_stop_exit_pending(entry: Dict, stop_price: float, now_epoch: float,
+                             grace_seconds: float = BROKER_STOP_FALLBACK_SECONDS) -> tuple:
+    """The price crossed the stop: wait for the broker stop to fill, or let the software exit now?
+
+    Returns (wait, updates). Waits only while the broker stop is working at (or above) this
+    stop level and for at most grace_seconds since the first crossing; after that the
+    software exit runs (it cancels the broker stop first and checks the position, so it
+    cannot sell twice).
+    """
+    trigger = safe_float(entry.get("emergency_sl_trigger_price"), 0.0)
+    covered = broker_stop_is_working(entry) and trigger >= safe_float(stop_price, 0.0) - OPTION_TICK_SIZE / 2
+    if not BROKER_STOP_FOLLOWS_TRAILING or not covered:
+        return False, {"stop_crossed_at": None}
+    since = safe_float(entry.get("stop_crossed_at"), 0.0) or float(now_epoch)
+    if float(now_epoch) - since < float(grace_seconds):
+        return True, {"stop_crossed_at": since}
+    print(f"[BROKER STOP FALLBACK] {entry.get('option_symbol')}: broker stop at {trigger:.2f} not filled "
+          f"{float(now_epoch) - since:.1f}s after the price crossed {safe_float(stop_price, 0.0):.2f}; software exit")
+    return False, {"stop_crossed_at": since}
+
+
 def rearm_adopted_position_protection(kite: KiteConnect, tradingsymbol: str, qty: int, entry_price: float,
                                       orders: Optional[List[Dict]] = None) -> Dict:
     """Protect a position taken over from the broker when LIVE_ORDER starts (e.g. after a crash).
@@ -976,15 +1066,19 @@ def rearm_adopted_position_protection(kite: KiteConnect, tradingsymbol: str, qty
        has already sold and open a short position.
     2. Place a fresh broker stop at entry - FIXED_SL_POINTS, linked to the position.
     If the new stop is rejected, the stop price is still returned so the software stop
-    covers the position. Returns the fields to merge into the adopted broker entry.
+    covers the position. A stop the previous session had already raised (locked profit) is
+    kept at its level. Returns the fields to merge into the adopted broker entry.
     """
     cancelled = []
+    previous_trigger = 0.0
     for order in orders or []:
         if not is_own_pending_exit_order(order, tradingsymbol):
             continue
         order_id = str(order.get("order_id") or "").strip()
         if not order_id:
             continue
+        if str(order.get("order_type") or "").upper() in {"SL", "SL-M"}:
+            previous_trigger = max(previous_trigger, safe_float(order.get("trigger_price"), 0.0))
         try:
             kite.cancel_order(variety=str(order.get("variety") or LIVE_ORDER_VARIETY), order_id=order_id)
             cancelled.append(order_id)
@@ -995,17 +1089,27 @@ def rearm_adopted_position_protection(kite: KiteConnect, tradingsymbol: str, qty
 
     sl_points = get_dynamic_emergency_sl_points(entry_price)
     stop_price = round(max(0.05, safe_float(entry_price, 0.0) - sl_points), 1)
+    kept_level = round_to_tick(previous_trigger, OPTION_TICK_SIZE) if previous_trigger > stop_price + OPTION_TICK_SIZE else 0.0
     out = {
         "emergency_sl_order_id": "",
         "emergency_sl_price": stop_price,
         "emergency_sl_trigger_price": stop_price,
         "emergency_sl_pct_used": sl_points,
-        "trailing_stop_price": stop_price,
+        "trailing_stop_price": kept_level or stop_price,
         "adopt_cancelled_order_ids": ",".join(cancelled),
     }
+    if kept_level:
+        out.update({"trailing_stop_active": True, "broker_stop_raised": True, "emergency_sl_trigger_price": kept_level})
+        print(f"[LIVE ADOPT] Keeping the previous session's raised stop for {tradingsymbol} at {kept_level:.2f}")
     if safe_float(entry_price, 0.0) <= 0 or safe_int(qty, 0) <= 0:
         return out
     try:
+        if kept_level and ENABLE_LIVE_ORDERS and ENABLE_EMERGENCY_SL_ORDER:
+            out.update({"emergency_sl_order_id": place_sell_stop_order(kite, tradingsymbol, int(qty), kept_level),
+                        "emergency_sl_order_type": "SL-M"})
+            print(f"[LIVE ADOPT] Placed broker stop for {tradingsymbol}: qty={qty} trigger={kept_level:.2f} "
+                  f"order_id={out['emergency_sl_order_id']}")
+            return out
         sl_meta = place_emergency_sl_order(kite, tradingsymbol, int(qty), float(entry_price))
         if sl_meta:
             out.update(sl_meta)
@@ -1041,7 +1145,7 @@ def sync_broker_position_state(kite: KiteConnect, broker_entry: Dict) -> Dict:
         out['emergency_sl_order_status'] = normalize_order_status(sl_snap.get('status'))
         if out['emergency_sl_order_status'] == 'COMPLETE':
             out['manual_or_broker_exit_detected'] = True
-            out['broker_exit_reason'] = 'EMERGENCY_SL_HIT'
+            out['broker_exit_reason'] = 'TRAILING_STOP_HIT' if out.get('broker_stop_raised') else 'EMERGENCY_SL_HIT'
             out['broker_exit_order_id'] = emergency_sl_order_id
             out['broker_exit_avg_price'] = extract_avg_price(sl_snap)
             out['broker_exit_time'] = extract_order_time(sl_snap)
@@ -4415,7 +4519,19 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     if min_trigger is not None and pnl_points_high >= float(min_trigger):
                         synced["trailing_stop_active"] = True
 
-                    if synced.get("trailing_stop_price", 0) > 0 and option_ltp <= float(synced.get("trailing_stop_price", 0)):
+                    # The broker stop follows the trailing stop and is the exit; the software
+                    # sells only if it has not filled shortly after the price crossed the stop.
+                    stop_now = safe_float(synced.get("trailing_stop_price"), 0.0)
+                    synced.update(raise_broker_stop(kite, synced, stop_now, option_ltp))
+                    stop_crossed = stop_now > 0 and option_ltp <= stop_now
+                    if stop_crossed:
+                        wait_for_broker_stop, wait_updates = broker_stop_exit_pending(synced, stop_now, time.time())
+                        synced.update(wait_updates)
+                        stop_crossed = not wait_for_broker_stop
+                    else:
+                        synced["stop_crossed_at"] = None
+
+                    if stop_crossed:
                         print(
                             f"[LIVE TRAIL EXIT] event_id={event_id} symbol={option_symbol} "
                             f"entry={entry_price_actual:.2f} ltp={option_ltp:.2f} "
