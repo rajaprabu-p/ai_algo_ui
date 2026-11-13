@@ -241,7 +241,10 @@
       .today-warn { color: #92400e; font-weight: 600; }
       .today-muted { color: #475569; }
       .today-fold > summary { cursor: pointer; }
-      .today-fold > div.row { margin-left: 1rem; font-size: 0.85rem; }
+      .today-run { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-top: 0.45rem; }
+      .today-run input[type=date] { font: inherit; padding: 0.2rem 0.3rem; }
+      .today-run button { margin: 0; padding: 0.25rem 0.6rem; font-size: 0.85rem; }
+      .today-fold > div.row { margin-left: 1rem; font-size: 0.85rem; white-space: pre-line; }
       .status-running { color: #166534; font-weight: 700; }
       .status-stopped { color: #b91c1c; font-weight: 700; }
       .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1rem; }
@@ -1277,8 +1280,60 @@
         NO_PAPER_TRADES: ['No paper trades', 'today-warn'], NO_TRADES: ['No trades', 'today-muted'],
       };
 
+      // Paper vs backtest check started from the card: the chosen date survives the 15 s refresh.
+      let parityRunDate = '';
+      async function runParityCheck(button){
+        const input = document.getElementById('parity-run-date');
+        const date = (input && input.value) || '';
+        button.disabled = true;
+        try {
+          const r = await fetch('/api/parity/run', {method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({date})});
+          const j = await r.json().catch(() => ({}));
+          if(!r.ok || !j.ok) alert('Could not start the check: ' + (j.msg || ('HTTP ' + r.status)));
+        } catch(error) {
+          alert('Could not start the check: ' + error.message);
+        }
+        loadTodayPanel();
+      }
+
+      function parityRunControls(run, today){
+        const box = document.createElement('div');
+        const status = document.createElement('div');
+        status.className = 'row today-muted';
+        if(run && run.running){
+          status.textContent = 'Checking ' + (run.date || '') + '… (about 2 minutes)';
+          status.className = 'row today-warn';
+        } else if(run && run.tail && run.tail.length){
+          // Last line of the last check, e.g. "report: ..." or "no downloaded option files ...".
+          const last = run.tail[run.tail.length - 1];
+          const at = (last.match(/^\[\S+ (\d{2}:\d{2})/) || [])[1] || '';
+          const text = last.replace(/^\[[^\]]*\]\s*/, '');
+          status.textContent = 'Last check (' + (run.date || '') + (at ? ', ' + at : '') + '): ' +
+            (text.startsWith('report:') ? 'done' : text);
+        }
+        if(status.textContent) box.appendChild(status);
+        const controls = document.createElement('div');
+        controls.className = 'today-run';
+        const input = document.createElement('input');
+        input.type = 'date';
+        input.id = 'parity-run-date';
+        input.max = today || '';
+        input.value = parityRunDate || today || '';
+        input.addEventListener('change', () => { parityRunDate = input.value; });
+        const button = document.createElement('button');
+        button.textContent = 'Run check';
+        button.disabled = !!(run && run.running);
+        button.addEventListener('click', () => runParityCheck(button));
+        controls.append(input, button);
+        box.appendChild(controls);
+        return box;
+      }
+
       async function loadTodayPanel(){
         const grid = document.getElementById('today-grid');
+        // Do not rebuild the cards while the check's date picker is in use.
+        if(document.activeElement && document.activeElement.id === 'parity-run-date') return;
         const updated = document.getElementById('today-updated');
         let j;
         try {
@@ -1304,6 +1359,17 @@
         if(a.last_check) aRows.push(['Last check', a.last_check.slice(11), 'today-muted']);
         cards.push(todayCard('Paper auto-start', aRows));
 
+        const d = j.download;
+        if(d){
+          const [dLabel, dCls] = DOWNLOAD_LABELS[d.status] || [d.status, 'today-muted'];
+          cards.push(todayCard('Daily download', [
+            ['', dLabel, dCls], ['Trade date', d.trade_date, 'today-muted'],
+            ['Last run', (d.finished_at || '') + ' IST', 'today-muted'],
+          ]));
+        } else {
+          cards.push(todayCard('Daily download', [['', 'No runs yet', 'today-muted']]));
+        }
+
         let todayLabel = j.date || '';
         try { if(todayLabel) todayLabel = new Date(todayLabel + 'T00:00').toLocaleDateString(undefined, {day: 'numeric', month: 'short'}); } catch(e) {}
         Object.entries(j.strategies || {}).forEach(([name, s]) => {
@@ -1322,9 +1388,13 @@
           } else {
             rows.push(['Open', 'no position', 'today-muted']);
           }
+          // One trade on two lines: "09:27 PE 164.55 → 09:34 138.95" (entry time/price → exit time/price),
+          // then "-1664 Rs (reason)". Trades read from the log have no entry time; they show the exit time only.
+          const tradeItem = t => ['', (t.entry_time ? t.entry_time + ' ' : '') + t.side + ' ' + Number(t.entry).toFixed(2) +
+            ' → ' + (t.time ? t.time + ' ' : '') + Number(t.exit).toFixed(2) + '\n' + todayRs(t.pnl_rs) + ' (' + t.reason + ')',
+            t.pnl_rs >= 0 ? 'today-ok' : 'today-bad'];
           // P&L and trade count on one line; the trade list and stop reason fold under it.
-          const items = (s.trades || []).map(t => ['', t.time + ' ' + t.side + ' ' + Number(t.entry).toFixed(2) + ' → ' +
-            Number(t.exit).toFixed(2) + ' ' + todayRs(t.pnl_rs) + ' (' + t.reason + ')', t.pnl_rs >= 0 ? 'today-ok' : 'today-bad']);
+          const items = (s.trades || []).map(tradeItem);
           if(s.stopped_by) items.push(['Stopped by', s.stopped_by, 'today-muted']);
           rows.push({fold: 'trades-' + name, items,
             summary: ['Papertrade P&L', todayRs(s.total_rs) + ' · Trades: ' + (s.trade_count || 0),
@@ -1332,8 +1402,7 @@
           // Today's backtest (newest backtest Excel of today's date), gross like the paper line.
           const bt = s.backtest;
           if(bt){
-            const btItems = (bt.trades || []).map(t => ['', t.time + ' ' + t.side + ' ' + Number(t.entry).toFixed(2) + ' → ' +
-              Number(t.exit).toFixed(2) + ' ' + todayRs(t.pnl_rs) + ' (' + t.reason + ')', t.pnl_rs >= 0 ? 'today-ok' : 'today-bad']);
+            const btItems = (bt.trades || []).map(tradeItem);
             btItems.push(['Run', (bt.run_at || '') + ' · ' + (bt.settings || ''), 'today-muted']);
             rows.push({fold: 'backtest-' + name, items: btItems,
               summary: ['Backtest P&L', todayRs(bt.total_rs) + ' · Trades: ' + (bt.trade_count || 0),
@@ -1343,17 +1412,6 @@
           }
           cards.push(todayCard(name + (todayLabel ? ' · ' + todayLabel : ''), rows));
         });
-
-        const d = j.download;
-        if(d){
-          const [dLabel, dCls] = DOWNLOAD_LABELS[d.status] || [d.status, 'today-muted'];
-          cards.push(todayCard('Daily download', [
-            ['', dLabel, dCls], ['Trade date', d.trade_date, 'today-muted'],
-            ['Last run', (d.finished_at || '') + ' IST', 'today-muted'],
-          ]));
-        } else {
-          cards.push(todayCard('Daily download', [['', 'No runs yet', 'today-muted']]));
-        }
 
         const par = j.parity;
         if(par){
@@ -1378,6 +1436,7 @@
         } else {
           cards.push(todayCard('Paper vs backtest', [['', 'No report yet', 'today-muted']]));
         }
+        cards[cards.length - 1].appendChild(parityRunControls(j.parity_run, j.date));
 
         grid.replaceChildren(...cards);
         updated.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' (refreshes every 15 seconds)';

@@ -1827,9 +1827,12 @@ def today_paper_trades(log_dir: str, variant: str, today: str) -> list:
 
 
 def _card_trade(t: dict) -> dict:
-    """A result-file trade in the Today card's shape (time = exit HH:MM)."""
-    text = str(t.get("exit_time") or "")
-    return {"time": text[11:16] if len(text) >= 16 else text[:5], "side": t["side"], "symbol": t["symbol"],
+    """A result-file trade in the Today card's shape (time = exit HH:MM, entry_time = entry HH:MM)."""
+    def hhmm(value):
+        text = str(value or "")
+        return text[11:16] if len(text) >= 16 else text[:5]
+
+    return {"time": hhmm(t.get("exit_time")), "entry_time": hhmm(t.get("entry_time")), "side": t["side"], "symbol": t["symbol"],
             "entry": t.get("entry_price", 0.0), "exit": t.get("exit_price", 0.0),
             "reason": t["exit_reason"], "pnl_points": t.get("pnl_points", 0.0), "pnl_rs": t["pnl_rs"]}
 
@@ -1911,6 +1914,71 @@ def parse_autostart_log_today(text: str, today: str, started_markers: dict) -> d
             "started": started_markers}
 
 
+PARITY_SCRIPT = os.path.join(WORKDIR, "scripts", "paper_vs_backtest.py")
+PARITY_RUN_LOG = os.path.join(PARITY_DIR, "parity_run.log")
+PARITY_RUN_META = os.path.join(PARITY_DIR, "parity_run.json")
+
+
+def parity_run_status() -> dict:
+    """The UI-started paper vs backtest check: running or not, its date and the log's last lines."""
+    meta = {}
+    try:
+        with open(PARITY_RUN_META, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception:
+        return {"running": False}
+    pid = safe_int_value(meta.get("pid"))
+    lines = [l.rstrip() for l in _read_tail(PARITY_RUN_LOG, 16 * 1024).splitlines() if l.strip()] \
+        if os.path.isfile(PARITY_RUN_LOG) else []
+    return {"running": bool(pid) and is_pid_running(pid), "date": meta.get("date", ""),
+            "started_at": meta.get("started_at", ""), "tail": lines[-8:]}
+
+
+def safe_int_value(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+@app.route("/api/parity/run", methods=["POST"])
+def api_parity_run():
+    """Start scripts/paper_vs_backtest.py for one date (default today) in the background."""
+    data = request.get_json(silent=True) or {}
+    today = datetime.now(IST).date().isoformat()
+    trade_date = str(data.get("date") or today).strip()
+    if not DATE_RE.fullmatch(trade_date):
+        return jsonify({"ok": False, "msg": "invalid date"}), 400
+    if trade_date > today:
+        return jsonify({"ok": False, "msg": "date is in the future"}), 400
+    if parity_run_status().get("running"):
+        return jsonify({"ok": False, "msg": "a check is already running"}), 409
+    token = kite_token_status()
+    if token["state"] in {"missing", "expired"}:
+        return jsonify({"ok": False, "msg": token["message"]}), 409
+    os.makedirs(PARITY_DIR, exist_ok=True)
+    cmd = [strategy_python_executable(), "-u", PARITY_SCRIPT, "--date", trade_date]
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        with open(PARITY_RUN_LOG, "w", encoding="utf-8") as logf:
+            logf.write(f"=== starting: paper vs backtest check for {trade_date} at {ist_now_str()} ===\n")
+            logf.flush()
+            proc = subprocess.Popen(cmd, cwd=WORKDIR, stdout=logf, stderr=subprocess.STDOUT, env=env,
+                                    close_fds=True, **strategy_process_options())
+        with open(PARITY_RUN_META, "w", encoding="utf-8") as f:
+            json.dump({"pid": proc.pid, "date": trade_date, "started_at": ist_now_str()}, f)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+    return jsonify({"ok": True, "msg": f"started check for {trade_date}", "pid": proc.pid})
+
+
+@app.route("/api/parity/status")
+def api_parity_status():
+    return jsonify({"ok": True, **parity_run_status()})
+
+
 @app.route("/api/today")
 def api_today():
     today = datetime.now(IST).date().isoformat()
@@ -1960,7 +2028,9 @@ def api_today():
 
     parity = None
     try:
-        reports = sorted(n for n in os.listdir(PARITY_DIR) if re.fullmatch(r"parity_\d{4}-\d{2}-\d{2}\.json", n))
+        # The report written last (a check re-run for an older date shows that date).
+        reports = sorted((n for n in os.listdir(PARITY_DIR) if re.fullmatch(r"parity_\d{4}-\d{2}-\d{2}\.json", n)),
+                         key=lambda n: (os.path.getmtime(os.path.join(PARITY_DIR, n)), n))
         if reports:
             with open(os.path.join(PARITY_DIR, reports[-1]), "r", encoding="utf-8") as f:
                 report = json.load(f)
@@ -1972,8 +2042,12 @@ def api_today():
     except Exception:
         parity = None
 
+    try:
+        parity_run = parity_run_status()
+    except Exception:
+        parity_run = {"running": False}
     return jsonify({"ok": True, "date": today, "token": kite_token_status(), "autostart": autostart,
-                    "strategies": strategies, "download": download, "parity": parity})
+                    "strategies": strategies, "download": download, "parity": parity, "parity_run": parity_run})
 
 
 # ---------------------------------------------------------------------------

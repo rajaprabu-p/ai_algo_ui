@@ -3,6 +3,7 @@
     venv\\Scripts\\python.exe -m unittest discover -s scripts\\tests -p "test_today_panel.py" -v
 """
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -135,7 +136,7 @@ class RunModeAndPaperExcelTests(unittest.TestCase):
             write(tmp, "backtest_13112026_mtf5min_mfe_max2_sl25_v28_csv.xlsx", [t], 2_100_000_000)   # other variant
             bt = webapp.today_backtest_summary(tmp, "v30", "2026-11-13")
         self.assertEqual((bt["trade_count"], bt["total_rs"]), (2, -780.0))
-        self.assertEqual([r["time"] for r in bt["trades"]], ["09:30", "09:58"])
+        self.assertEqual([(r["entry_time"], r["time"]) for r in bt["trades"]], [("09:27", "09:30"), ("09:41", "09:58")])
         self.assertEqual(bt["settings"], "mtf5min_mfe_max2_sl25 (csv)")
 
 
@@ -166,6 +167,39 @@ class TodayEndpointTests(unittest.TestCase):
         for key in ("date", "token", "autostart", "strategies", "download", "parity"):
             self.assertIn(key, j)
         self.assertEqual(set(j["strategies"]), {"v28", "v30"})
+
+    def test_parity_run_endpoint(self):
+        import json
+        import tempfile
+        from unittest import mock
+
+        client = webapp.app.test_client()
+        with client.session_transaction() as s:
+            s["logged_in"] = True
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = {"PARITY_DIR": tmp, "PARITY_RUN_LOG": os.path.join(tmp, "parity_run.log"),
+                     "PARITY_RUN_META": os.path.join(tmp, "parity_run.json")}
+            fake_proc = mock.Mock(pid=4321)
+            with mock.patch.multiple(webapp, **paths), \
+                    mock.patch.object(webapp, "kite_token_status", return_value={"state": "valid", "message": ""}), \
+                    mock.patch.object(webapp.subprocess, "Popen", return_value=fake_proc) as popen, \
+                    mock.patch.object(webapp, "is_pid_running", return_value=True):
+                self.assertEqual(client.post("/api/parity/run", json={"date": "13-11-2026"}).status_code, 400)
+                self.assertEqual(client.post("/api/parity/run", json={"date": "2999-01-01"}).status_code, 400)
+                r = client.post("/api/parity/run", json={"date": "2026-11-13"})
+                self.assertEqual(r.status_code, 200, r.get_json())
+                cmd = popen.call_args[0][0]
+                self.assertEqual(cmd[-3:], [webapp.PARITY_SCRIPT, "--date", "2026-11-13"][-3:])
+                with open(paths["PARITY_RUN_META"], encoding="utf-8") as f:
+                    self.assertEqual(json.load(f)["date"], "2026-11-13")
+                status = client.get("/api/parity/status").get_json()
+                self.assertTrue(status["running"])
+                self.assertEqual(status["date"], "2026-11-13")
+                # a second start while the first runs is refused
+                self.assertEqual(client.post("/api/parity/run", json={}).status_code, 409)
+            with mock.patch.multiple(webapp, **paths), mock.patch.object(webapp, "is_pid_running", return_value=False):
+                self.assertFalse(client.get("/api/parity/status").get_json()["running"])
+                self.assertIn("parity_run", client.get("/api/today").get_json())
 
     def test_panel_on_dashboard(self):
         client = webapp.app.test_client()
