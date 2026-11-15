@@ -67,7 +67,7 @@
     .cmp-table { overflow-x: auto; }
     .cmp-settings { width: 300px; max-width: 100%; text-overflow: ellipsis; }
     @media (max-width: 700px) {
-      .filters label.compare-only, .filters label.pvb-only { flex-basis: 100%; }
+      .filters label.compare-only, .filters label.pvb-only, .filters label.cs-only { flex-basis: 100%; }
       .cmp-settings { width: 100%; }
     }
     .cmp-table td.better { font-weight: 600; color: var(--text-primary); }
@@ -240,6 +240,7 @@
         <button type="button" data-view="single" class="active">One strategy</button>
         <button type="button" data-view="compare">Compare v28 vs v30</button>
         <button type="button" data-view="pvb">Paper vs backtest</button>
+        <button type="button" data-view="cs">Compare settings</button>
       </span>
     </label>
     <label class="strategy-ctl">Strategy
@@ -259,6 +260,12 @@
     </label>
     <label class="pvb-only" hidden>Paper settings
       <select id="settings-paper" class="cmp-settings pvb-settings"></select>
+    </label>
+    <label class="cs-only" hidden>Settings A
+      <select id="settings-a" class="cmp-settings"></select>
+    </label>
+    <label class="cs-only" hidden>Settings B
+      <select id="settings-b" class="cmp-settings"></select>
     </label>
     <label class="pvb-only pvb-check" hidden>
       <span><input type="checkbox" id="include-late" /> Include days paper started late or restarted (after 09:20)</span>
@@ -650,6 +657,7 @@
     async function load(keepSettings = true){
       if(view === 'compare') return loadCompare(keepSettings);
       if(view === 'pvb') return loadPaperVsBacktest(keepSettings);
+      if(view === 'cs') return loadCompareSettings(keepSettings);
       const content = document.getElementById('content');
       content.classList.add('loading');
       const params = new URLSearchParams({
@@ -894,6 +902,69 @@
       hit.addEventListener('pointerleave', hide); hit.addEventListener('blur', hide);
     }
 
+    // ---- Compare settings view: one strategy and source, two settings groups, common days only ----
+    // Short names from what differs between the two settings names, e.g.
+    // "mtf5min_mfe_max2_sl25 (csv)" vs "mtf5min_max2_sl25 (csv)" -> "mfe" and "no mfe".
+    function settingsLabels(a, b){
+      const tokens = s => String(s || '').replace(/[()]/g, '').split(/[_\s]+/).filter(Boolean);
+      const ta = tokens(a), tb = tokens(b);
+      const onlyA = ta.filter(t => !tb.includes(t)), onlyB = tb.filter(t => !ta.includes(t));
+      let la = onlyA.join(' '), lb = onlyB.join(' ');
+      if(la && !lb) lb = 'no ' + la;
+      else if(lb && !la) la = 'no ' + lb;
+      if(!la || !lb || la.length > 18 || lb.length > 18 || la === lb) return ['A', 'B'];
+      return [la, lb];
+    }
+
+    async function loadCompareSettings(keepSettings = true){
+      const box = document.getElementById('compare');
+      box.classList.add('loading');
+      const variant = document.getElementById('variant').value, source = document.getElementById('source').value;
+      const params = new URLSearchParams({
+        source, variant, from: document.getElementById('from').value, to: document.getElementById('to').value,
+        a: keepSettings ? (document.getElementById('settings-a').value || '') : '',
+        b: keepSettings ? (document.getElementById('settings-b').value || '') : '',
+      });
+      let j;
+      try {
+        const r = await fetch('/api/performance/compare-settings?' + params);
+        if(r.status === 401){ location.href = '/login'; return; }
+        j = await r.json();
+      } catch(error) {
+        document.getElementById('basis').textContent = 'Could not load performance data: ' + error.message;
+        box.classList.remove('loading');
+        return;
+      }
+      groups = j.groups || [];
+      const sel = j.selected || {};
+      fillSettingsFrom('settings-a', source, variant, sel.a);
+      fillSettingsFrom('settings-b', source, variant, sel.b);
+      const [nameA, nameB] = settingsLabels(sel.a, sel.b);
+      const sourceLabel = {backtest: 'backtest', paper: 'paper trading', live: 'live trading'}[source] || source;
+      document.getElementById('cmp-title').textContent = `${variant} ${sourceLabel}: ${nameA} vs ${nameB}`;
+      const c = j.comparison;
+      const items = [
+        {name: nameA, color: css('--series-v28'), result: c && c.a, settings: sel.a},
+        {name: nameB, color: css('--series-v30'), result: c && c.b, settings: sel.b},
+      ];
+      let basis = '';
+      if(c && c.common_days){
+        const extra = [];
+        if(c.only_a.length) extra.push(`only in ${nameA}: ${c.only_a.length} day(s)`);
+        if(c.only_b.length) extra.push(`only in ${nameB}: ${c.only_b.length} day(s)`);
+        basis = `${nameA} = ${sel.a} · ${nameB} = ${sel.b}. Compared on the ${c.common_days} day(s) both have` +
+          (extra.length ? ` (left out — ${extra.join('; ')})` : '') + '. ' +
+          (c.basis === 'net' ? 'Both net of slippage and charges.' : 'Both before charges.');
+      }
+      renderCompare(items, {
+        missing: '', basis,
+        empty: !sel.a ? `No ${sourceLabel} results for ${variant} yet.`
+          : !sel.b ? `Only one settings group for ${variant} ${sourceLabel} (${sel.a}). Run it with other settings to compare.`
+          : 'These two settings groups have no days in common for this selection.',
+      });
+      box.classList.remove('loading');
+    }
+
     // Two result sets side by side. items: [{name, color, result, settings}] (A first, B second).
     // opts: {basis, missing, empty} texts for the line above and for an empty selection.
     function renderCompare(items, opts){
@@ -1051,6 +1122,7 @@
       document.querySelectorAll('.strategy-ctl').forEach(n => { n.hidden = view === 'compare'; });
       document.querySelectorAll('.compare-only').forEach(n => { n.hidden = view !== 'compare'; });
       document.querySelectorAll('.pvb-only').forEach(n => { n.hidden = view !== 'pvb'; });
+      document.querySelectorAll('.cs-only').forEach(n => { n.hidden = view !== 'cs'; });
       document.getElementById('source-label').hidden = view === 'pvb';   // paper vs backtest picks both sources
       document.getElementById('content').hidden = view !== 'single';
       document.getElementById('compare').hidden = view === 'single';
@@ -1079,7 +1151,7 @@
     let resizeTimer;
     window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => load(), 200); });
     let savedView = 'single';
-    try { const v = localStorage.getItem('perfView'); savedView = ['compare', 'pvb'].includes(v) ? v : 'single'; } catch(e) {}
+    try { const v = localStorage.getItem('perfView'); savedView = ['compare', 'pvb', 'cs'].includes(v) ? v : 'single'; } catch(e) {}
     if(savedView !== 'single') setView(savedView); else load(false);
   </script>
   <footer class="deploy-footer" title="{% for p in deploy.problems %}{{ p }}&#10;{% endfor %}">

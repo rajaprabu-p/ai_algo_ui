@@ -2424,6 +2424,60 @@ def compare_paper_backtest(paper_days: list, backtest_days: list, include_late: 
     }
 
 
+def compare_settings_days(a_days: list, b_days: list) -> dict:
+    """Two settings groups of one strategy on the days both have (pure function).
+
+    Same P&L basis on both sides (net only when every trade on both sides has charges).
+    Lists the days only one side has.
+    """
+    a_dates = {d["date"] for d in a_days}
+    b_dates = {d["date"] for d in b_days}
+    common = sorted(a_dates & b_dates)
+    a_common = [d for d in a_days if d["date"] in common]
+    b_common = [d for d in b_days if d["date"] in common]
+    basis = "net" if has_net_pnl(a_common) and has_net_pnl(b_common) else "gross"
+    return {
+        "basis": basis,
+        "common_days": len(common),
+        "only_a": sorted(a_dates - b_dates),
+        "only_b": sorted(b_dates - a_dates),
+        "a": compute_performance(a_common, basis) if common else None,
+        "b": compute_performance(b_common, basis) if common else None,
+    }
+
+
+@app.route("/api/performance/compare-settings")
+def api_performance_compare_settings():
+    """One strategy and source, two settings groups (e.g. with and without the MFE exit)."""
+    log_dir = LOGS_DIR
+    if not os.path.isdir(log_dir):
+        return jsonify({"ok": True, "groups": [], "selected": None, "comparison": None})
+    group_list = performance_groups(log_dir)
+    source = request.args.get("source", "backtest")
+    if source not in {"backtest", "paper", "live"}:
+        source = "backtest"
+    variant = request.args.get("variant", "v28")
+    date_from, date_to = _date_arg("from"), _date_arg("to")
+    # Same default order as the single view: downloaded-CSV runs first, then most days, then newest.
+    candidates = sorted((g for g in group_list if g["source"] == source and g["variant"] == variant),
+                        key=lambda g: (g["settings"].endswith("(csv)"), g["days"], g["last"]), reverse=True)
+    names = [g["settings"] for g in candidates]
+    a = request.args.get("a", "")
+    if a not in names:
+        a = names[0] if names else ""
+    b = request.args.get("b", "")
+    if b not in names or b == a:
+        b = next((n for n in names if n != a), "")
+    comparison = None
+    if a and b:
+        comparison = compare_settings_days(
+            collect_performance_days(log_dir, source, variant, a, date_from, date_to),
+            collect_performance_days(log_dir, source, variant, b, date_from, date_to))
+    return jsonify({"ok": True, "groups": group_list,
+                    "selected": {"source": source, "variant": variant, "a": a, "b": b, "from": date_from, "to": date_to},
+                    "comparison": comparison})
+
+
 @app.route("/api/performance/paper-vs-backtest")
 def api_performance_paper_vs_backtest():
     """One strategy's paper trading against its backtest, on the days both exist."""

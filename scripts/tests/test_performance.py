@@ -183,6 +183,51 @@ class PaperVsBacktestTests(unittest.TestCase):
         self.assertEqual(webapp.app.test_client().get("/api/performance/paper-vs-backtest").status_code, 401)
 
 
+class CompareSettingsTests(unittest.TestCase):
+    def test_common_days_and_basis(self):
+        with_mfe = [{"date": "2026-11-11", "trades": [t(1000.0, 920.0)]}, {"date": "2026-11-12", "trades": [t(-500.0, -580.0)]}]
+        without = [{"date": "2026-11-12", "trades": [t(-1700.0, -1780.0)]}, {"date": "2026-11-13", "trades": [t(300.0, 220.0)]}]
+        r = webapp.compare_settings_days(with_mfe, without)
+        self.assertEqual((r["common_days"], r["only_a"], r["only_b"], r["basis"]), (1, ["2026-11-11"], ["2026-11-13"], "net"))
+        self.assertEqual((r["a"]["kpis"]["net_pnl"], r["b"]["kpis"]["net_pnl"]), (-580.0, -1780.0))
+        self.assertIsNone(webapp.compare_settings_days(with_mfe[:1], without[1:])["a"])     # no common day
+
+    def test_route_picks_two_different_groups(self):
+        import shutil
+        import tempfile
+        from unittest import mock
+
+        import pandas as pd
+
+        tmp = tempfile.mkdtemp(prefix="perf_cs_")
+        try:
+            row = {"entry_time": "2026-11-12 09:30:00", "exit_time": "2026-11-12 09:45:00", "side": "CE", "option_symbol": "X",
+                   "exit_reason": "TRAILING_STOP_HIT", "pnl_rs": 650.0, "pnl_points": 10.0, "net_pnl_rs": 570.0}
+            for name, pnl in (("backtest_12112026_mtf5min_mfe_max2_sl25_v28_csv.xlsx", 650.0),
+                              ("backtest_12112026_mtf5min_max2_sl25_v28_csv.xlsx", -1625.0),
+                              ("backtest_12112026_mtf5min_mfe_max2_sl25_v30_csv.xlsx", 100.0)):
+                with pd.ExcelWriter(Path(tmp) / name) as xw:
+                    pd.DataFrame([dict(row, pnl_rs=pnl, net_pnl_rs=pnl - 80)]).to_excel(xw, sheet_name="trades", index=False)
+            user = webapp.app.test_client()
+            with user.session_transaction() as s:
+                s["logged_in"] = True
+            with mock.patch.object(webapp, "LOGS_DIR", tmp):
+                j = user.get("/api/performance/compare-settings?source=backtest&variant=v28").get_json()
+                sel = j["selected"]
+                self.assertEqual({sel["a"], sel["b"]}, {"mtf5min_mfe_max2_sl25 (csv)", "mtf5min_max2_sl25 (csv)"})
+                self.assertEqual(j["comparison"]["common_days"], 1)
+                # asking for the same group twice still compares two different ones
+                same = user.get("/api/performance/compare-settings?variant=v28&a=mtf5min_max2_sl25 (csv)&b=mtf5min_max2_sl25 (csv)").get_json()
+                self.assertNotEqual(same["selected"]["a"], same["selected"]["b"])
+                # v30 has one group only: nothing to compare
+                one = user.get("/api/performance/compare-settings?variant=v30").get_json()
+                self.assertEqual((one["selected"]["b"], one["comparison"]), ("", None))
+            self.assertEqual(webapp.app.test_client().get("/api/performance/compare-settings").status_code, 401)
+        finally:
+            webapp._PERF_CACHE.clear()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class RouteTests(unittest.TestCase):
     def test_login_required_and_page(self):
         anon = webapp.app.test_client()
