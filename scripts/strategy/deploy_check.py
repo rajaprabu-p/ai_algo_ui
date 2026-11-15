@@ -1,8 +1,9 @@
 """Deployment manifest: catch missed or stale files after a FileZilla upload.
 
 `python scripts/make_manifest.py` (run on your PC before uploading) writes
-scripts/strategy/MANIFEST.json with a fingerprint of every file the strategy
-needs. At startup the engine compares the files on disk with it:
+MANIFEST.json in the project folder (next to app.py) with a fingerprint of every
+file the strategy needs. (It used to live in scripts/strategy/; that copy is still
+read when the new one is missing, so a server keeps working until the next upload.) At startup the engine compares the files on disk with it:
 
   * all files match            -> one "[DEPLOY CHECK] ... OK" line
   * missing / changed / extra  -> each problem is listed;
@@ -31,7 +32,19 @@ from pathlib import Path
 MANIFEST_NAME = "MANIFEST.json"
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 PACKAGE_DIR = Path(__file__).resolve().parent
-MANIFEST_PATH = PACKAGE_DIR / MANIFEST_NAME
+MANIFEST_PATH = SCRIPTS_DIR.parent / MANIFEST_NAME
+
+
+def manifest_write_path(scripts_dir: Path = SCRIPTS_DIR) -> Path:
+    """Where make_manifest.py writes the manifest: the project folder, next to app.py."""
+    return scripts_dir.parent / MANIFEST_NAME
+
+
+def manifest_read_path(scripts_dir: Path = SCRIPTS_DIR) -> Path:
+    """The manifest to check against: the project-folder one, else the old scripts/strategy/ copy."""
+    path = manifest_write_path(scripts_dir)
+    legacy = scripts_dir / "strategy" / MANIFEST_NAME
+    return legacy if (not path.exists() and legacy.exists()) else path
 # Files outside the strategy/ package that the engine needs (relative to scripts/).
 EXTRA_FILES = ("v28_strategy_main.py", "v30_strategy_main.py", "editable_config.py")
 PROJECT_DIR = SCRIPTS_DIR.parent
@@ -98,8 +111,11 @@ def build_manifest(scripts_dir: Path = SCRIPTS_DIR, version: str | None = None) 
 
 def write_manifest(scripts_dir: Path = SCRIPTS_DIR, version: str | None = None) -> tuple[Path, dict]:
     manifest = build_manifest(scripts_dir, version)
-    path = scripts_dir / "strategy" / MANIFEST_NAME
+    path = manifest_write_path(scripts_dir)
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    legacy = scripts_dir / "strategy" / MANIFEST_NAME
+    if legacy.exists():
+        legacy.unlink()   # one manifest only; the old location is just a fallback for servers not yet updated
     return path, manifest
 
 
@@ -125,7 +141,7 @@ class CheckResult:
 
 
 def check(scripts_dir: Path = SCRIPTS_DIR) -> CheckResult:
-    path = scripts_dir / "strategy" / MANIFEST_NAME
+    path = manifest_read_path(scripts_dir)
     if not path.exists():
         return CheckResult(error=f"no {MANIFEST_NAME} in {path.parent} (run scripts/make_manifest.py before uploading)")
     try:
@@ -148,7 +164,7 @@ def check(scripts_dir: Path = SCRIPTS_DIR) -> CheckResult:
 
 def check_app(scripts_dir: Path = SCRIPTS_DIR) -> CheckResult:
     """Compare the dashboard files with the manifest's "app_files" (the engine does not use this)."""
-    path = scripts_dir / "strategy" / MANIFEST_NAME
+    path = manifest_read_path(scripts_dir)
     project_dir = scripts_dir.parent
     if not path.exists():
         return CheckResult(error=f"no {MANIFEST_NAME} (run scripts/make_manifest.py)")
@@ -187,7 +203,7 @@ def upload_list(changed: list[str], scripts_dir: Path = SCRIPTS_DIR) -> list[str
     """
     deployed = {f"scripts/{rel}" for rel in tracked_files(scripts_dir)} | set(app_tracked_files(scripts_dir.parent))
     files = sorted({p for p in changed if p in deployed})
-    return files + [f"scripts/strategy/{MANIFEST_NAME}"]
+    return files + [MANIFEST_NAME]
 
 
 def verify_or_exit(run_mode: str, scripts_dir: Path = SCRIPTS_DIR, environ=None) -> CheckResult:

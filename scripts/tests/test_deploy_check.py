@@ -72,6 +72,19 @@ class DeployCheckTests(unittest.TestCase):
         # a dashboard file never blocks LIVE_ORDER: the engine checks "files" only
         self.assertTrue(deploy_check.check(self.scripts).ok)
 
+    def test_manifest_lives_in_the_project_folder(self):
+        self.assertTrue((self.tmp / "MANIFEST.json").exists())
+        self.assertFalse((self.scripts / "strategy" / "MANIFEST.json").exists())
+        # a server not yet updated still has only the old copy: it is read as a fallback
+        legacy = self.scripts / "strategy" / "MANIFEST.json"
+        (self.tmp / "MANIFEST.json").replace(legacy)
+        self.assertTrue(deploy_check.check(self.scripts).ok)
+        self.assertEqual(deploy_check.check(self.scripts).version, "test-1")
+        # writing again moves it to the project folder and removes the old copy
+        deploy_check.write_manifest(self.scripts, version="test-3")
+        self.assertFalse(legacy.exists())
+        self.assertEqual(deploy_check.check(self.scripts).version, "test-3")
+
     def test_commit_from_version(self):
         self.assertEqual(deploy_check.commit_from_version("2026-11-13_1825_6a2485f"), "6a2485f")
         self.assertEqual(deploy_check.commit_from_version(" 2026-11-13_1821_5089875-dirty "), "5089875")
@@ -86,13 +99,13 @@ class DeployCheckTests(unittest.TestCase):
                    "AUTOMATION.md", "scripts/editable_config.json", ".env", "scripts/v28_strategy_main.py"]
         self.assertEqual(deploy_check.upload_list(changed, self.scripts), [
             "app.py", "scripts/strategy/engine.py", "scripts/v28_strategy_main.py", "templates/index.html",
-            "scripts/strategy/MANIFEST.json",
+            "MANIFEST.json",
         ])
-        self.assertEqual(deploy_check.upload_list([], self.scripts), ["scripts/strategy/MANIFEST.json"])
+        self.assertEqual(deploy_check.upload_list([], self.scripts), ["MANIFEST.json"])
 
     def test_old_manifest_without_dashboard_files(self):
         import json
-        path = self.scripts / "strategy" / "MANIFEST.json"
+        path = self.tmp / "MANIFEST.json"
         manifest = json.loads(path.read_text(encoding="utf-8"))
         manifest.pop("app_files")
         path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -139,13 +152,13 @@ class DeployCheckTests(unittest.TestCase):
         self.assertTrue(deploy_check.check(self.scripts).ok)
 
     def test_no_manifest(self):
-        (self.scripts / "strategy" / deploy_check.MANIFEST_NAME).unlink()
+        (self.tmp / deploy_check.MANIFEST_NAME).unlink()
         result = deploy_check.check(self.scripts)
         self.assertIn("make_manifest.py", result.error)
         self.assertEqual(self.run_verify("LIVE_ORDER")[0], deploy_check.EXIT_CODE_BLOCKED)
 
     def test_corrupt_manifest(self):
-        (self.scripts / "strategy" / deploy_check.MANIFEST_NAME).write_text("{not json", encoding="utf-8")
+        (self.tmp / deploy_check.MANIFEST_NAME).write_text("{not json", encoding="utf-8")
         self.assertIn("cannot read", deploy_check.check(self.scripts).error)
 
     def test_paper_and_backtest_only_warn(self):

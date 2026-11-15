@@ -80,6 +80,9 @@ def prepare_workspace(root: Path) -> Path:
         ignore=shutil.ignore_patterns("tests", "__pycache__", "*.lock", "*.orig", "*.mode", "data", "editable_config.json"),
     )
     shutil.copyfile(PINNED_CONFIG, work_scripts / "editable_config.json")
+    manifest = PROJECT_ROOT / "MANIFEST.json"   # the deploy check reads it from beside scripts/
+    if manifest.exists():
+        shutil.copyfile(manifest, root / "MANIFEST.json")
     return work_scripts
 
 

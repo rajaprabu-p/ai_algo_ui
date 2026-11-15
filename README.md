@@ -74,7 +74,7 @@ Strategy logic lives in `scripts/strategy/` (`engine.py` plus per-variant settin
 
 1. On your PC, after the last code change: `venv\Scripts\python.exe scripts\make_manifest.py`
 2. Stop the strategy on the server (outside market hours).
-3. In FileZilla, upload the **whole `scripts/strategy/` folder** (it includes `MANIFEST.json`) and
+3. In FileZilla, upload **`MANIFEST.json`** (project folder, next to `app.py`), the **whole `scripts/strategy/` folder** and
    overwrite. Also upload the launchers, `scripts/editable_config.py` or `app.py`/`templates/` if they changed.
 4. Start the app and check the strategy log for `[DEPLOY CHECK] version=..., N files OK`.
 

@@ -142,6 +142,8 @@ def run_backtest(variant: str, trade_day: date, env_file: dict | None = None,
         work = tmp / "scripts"
         shutil.copytree(SCRIPTS_DIR, work, ignore=shutil.ignore_patterns(
             "tests", "__pycache__", "data", "*.lock", "*.mode", "*.orig"))
+        if (PROJECT_ROOT / "MANIFEST.json").exists():   # the deploy check reads it from beside scripts/
+            shutil.copyfile(PROJECT_ROOT / "MANIFEST.json", tmp / "MANIFEST.json")
         out_dir = tmp / "logs"
         out_dir.mkdir()
         env = os.environ.copy()

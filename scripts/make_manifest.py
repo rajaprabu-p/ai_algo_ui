@@ -1,9 +1,7 @@
-"""Write scripts/strategy/MANIFEST.json before uploading the strategy to the server.
+"""Write MANIFEST.json (project folder, next to app.py) before uploading to the server.
 
 Run it on your PC after your last code change, then upload with FileZilla:
-the whole scripts/strategy/ folder (it contains MANIFEST.json) plus
-scripts/v28_strategy_main.py, scripts/v30_strategy_main.py and
-scripts/editable_config.py if they changed.
+MANIFEST.json plus the files that changed (--since lists them).
 
     venv\\Scripts\\python.exe scripts\\make_manifest.py
     venv\\Scripts\\python.exe scripts\\make_manifest.py --check    # compare files here with the manifest
@@ -52,7 +50,7 @@ def main() -> int:
     print("  (dashboard: " + ", ".join(manifest["app_files"]) + ")")
     if manifest["version"].endswith("-dirty"):
         print("Note: you have uncommitted changes; consider committing before deploying.")
-    print("\nUpload with FileZilla: the whole scripts/strategy/ folder, plus any changed files listed outside it.")
+    print("\nUpload with FileZilla: MANIFEST.json (project folder) plus the changed files; --since <server version> lists them.")
     print("The dashboard footer shows this version and whether every file on the server matches it.")
     if since_files is not None:
         print(f"\nTo update the server from {args.since} to {manifest['version']}, upload these "
@@ -61,7 +59,7 @@ def main() -> int:
             print(f"  {rel}")
         if any(rel == "app.py" for rel in since_files):
             print("Then restart Flask (app.py changed).")
-        if any(rel.startswith("scripts/strategy/") and not rel.endswith("MANIFEST.json") or
+        if any(rel.startswith("scripts/strategy/") or
                rel in {"scripts/v28_strategy_main.py", "scripts/v30_strategy_main.py", "scripts/editable_config.py"}
                for rel in since_files):
             print("Then restart the paper sessions (strategy files changed).")
