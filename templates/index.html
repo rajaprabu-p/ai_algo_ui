@@ -2037,7 +2037,17 @@
             .split(/[\\/]/)
             .pop()
             .replace(/_strategy_main\.py$/i, '');
-          const processedFileNames = completedLog.split(/\r?\n/)
+          // The log box shows only the last 2000 lines; a long range prints more, so read the
+          // whole log to find every day's workbook (this run only: from its last start line).
+          let rangeLog = completedLog;
+          try{
+            const fullResponse = await fetch('/api/logs?full=true&name=' + encodeURIComponent(cfg.name));
+            const fullJson = await fullResponse.json();
+            if(fullJson.exists && fullJson.tail) rangeLog = String(fullJson.tail);
+          }catch(error){ /* keep the tail */ }
+          const runStart = rangeLog.lastIndexOf('[INFO] Running backtest for');
+          if(runStart > 0) rangeLog = rangeLog.slice(runStart);
+          const processedFileNames = rangeLog.split(/\r?\n/)
             .map(line => line.trim().match(/^\-\s+(?:.*[\\/])?(backtest_[^\s]+\.xlsx)$/i)?.[1] || '')
             .filter(name =>
               /^backtest_[^_]+_/i.test(name)
