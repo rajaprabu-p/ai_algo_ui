@@ -183,6 +183,36 @@ class PaperVsBacktestTests(unittest.TestCase):
         self.assertEqual(webapp.app.test_client().get("/api/performance/paper-vs-backtest").status_code, 401)
 
 
+class EntryTimeAndPeakTests(unittest.TestCase):
+    def test_buckets(self):
+        self.assertEqual([webapp.entry_time_bucket(f"2026-11-16 {hm}:00") for hm in ("09:24", "09:30", "10:29", "10:30", "13:05")],
+                         ["09:15-09:29", "09:30-09:59", "10:00-10:29", "10:30-10:59", "11:00 or later"])
+        self.assertEqual(webapp.entry_time_bucket(""), "")
+        self.assertEqual([webapp.peak_bucket(p) for p in (0, 9.99, 10, 25.95, 30, 50, None)],
+                         ["under +10", "under +10", "+10 to +20", "+20 to +30", "+30 to +50", "+50 or more", ""])
+        self.assertEqual(webapp.trade_peak_points({"high": 134.5, "entry_price": 108.55}), 25.95)
+        self.assertIsNone(webapp.trade_peak_points({"entry_price": 108.55}))           # old file: no high column
+
+    def test_breakdowns_and_gave_back(self):
+        def trade(entry, entry_price, high, pnl):
+            return dict(t(pnl, entry=entry), entry_price=entry_price, high=high, exit_time=entry)
+        days = [{"date": "2026-11-16", "trades": [
+            trade("2026-11-16 09:24:00", 105.55, 127.05, -1690.0),     # peak +21.5, full stop loss
+            trade("2026-11-16 09:44:00", 108.55, 134.50, 910.0),       # peak +25.95, a win
+            trade("2026-11-16 10:40:00", 100.0, 105.0, -300.0),        # never well in profit
+        ]}]
+        r = webapp.compute_performance(days)
+        self.assertEqual([(g["label"], g["count"]) for g in r["breakdowns"]["entry_time"]],
+                         [("09:15-09:29", 1), ("09:30-09:59", 1), ("10:30-10:59", 1)])
+        peak = {g["label"]: g for g in r["breakdowns"]["peak"]}
+        self.assertEqual((peak["+20 to +30"]["count"], peak["+20 to +30"]["total"], peak["under +10"]["count"]), (2, -780.0, 1))
+        gb = r["gave_back"]
+        self.assertEqual((len(gb["trades"]), gb["total"], gb["trades"][0]["peak_points"], gb["trades"][0]["entry_time"]),
+                         (1, -1690.0, 21.5, "09:24"))
+        # files without a high column: no peak, nothing listed, the rest still works
+        self.assertEqual(webapp.compute_performance([{"date": "2026-10-05", "trades": [t(-500)]}])["gave_back"]["trades"], [])
+
+
 class CompareSettingsTests(unittest.TestCase):
     def test_common_days_and_basis(self):
         with_mfe = [{"date": "2026-11-11", "trades": [t(1000.0, 920.0)]}, {"date": "2026-11-12", "trades": [t(-500.0, -580.0)]}]

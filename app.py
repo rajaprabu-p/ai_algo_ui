@@ -2180,7 +2180,9 @@ def _read_result_file(path: str, source: str) -> dict:
             if pd.isna(r.get("pnl_rs")):
                 continue
             net = r.get("net_pnl_rs")
+            high = r.get("high_during_trade")
             out["trades"].append({
+                "high": None if high is None or pd.isna(high) else float(high),
                 "entry_time": str(r.get("entry_time", "")), "exit_time": str(r.get("exit_time", "")),
                 "entry_price": float(r.get("entry_price", 0) or 0), "exit_price": float(r.get("exit_price", 0) or 0),
                 "side": str(r.get("side", "")),
@@ -2202,6 +2204,41 @@ def has_net_pnl(days: list) -> bool:
     """True when every trade of these days has net P&L (after charges)."""
     trades = [t for d in days for t in d["trades"]]
     return bool(trades) and all(t.get("net_pnl_rs") is not None for t in trades)
+
+
+ENTRY_TIME_BUCKETS = [("09:30", "09:15-09:29"), ("10:00", "09:30-09:59"), ("10:30", "10:00-10:29"), ("11:00", "10:30-10:59")]
+ENTRY_TIME_LAST_BUCKET = "11:00 or later"
+PEAK_BUCKETS = [(10, "under +10"), (20, "+10 to +20"), (30, "+20 to +30"), (50, "+30 to +50")]
+PEAK_LAST_BUCKET = "+50 or more"
+GAVE_BACK_PEAK_POINTS = 20.0   # "gave back": the option was up this many points and the trade still lost
+
+
+def entry_time_bucket(entry_time) -> str:
+    """Half-hour bucket of a trade's entry time ('YYYY-MM-DD HH:MM:SS'), '' when unknown."""
+    hhmm = str(entry_time or "")[11:16]
+    if len(hhmm) != 5 or hhmm[2] != ":":
+        return ""
+    for before, label in ENTRY_TIME_BUCKETS:
+        if hhmm < before:
+            return label
+    return ENTRY_TIME_LAST_BUCKET
+
+
+def trade_peak_points(trade: dict):
+    """Best profit the option reached during the trade, in points (None when the file has no high)."""
+    high, entry = trade.get("high"), trade.get("entry_price")
+    if not high or not entry:
+        return None
+    return round(max(0.0, float(high) - float(entry)), 2)
+
+
+def peak_bucket(points) -> str:
+    if points is None:
+        return ""
+    for below, label in PEAK_BUCKETS:
+        if points < below:
+            return label
+    return PEAK_LAST_BUCKET
 
 
 def compute_performance(days: list, basis: str = "") -> dict:
@@ -2270,14 +2307,33 @@ def compute_performance(days: list, basis: str = "") -> dict:
         return result
 
     order = {d: i for i, d in enumerate(_WEEKDAYS)}
-    trade_rows = [{"exit_reason": t["exit_reason"], "pnl": t[key]} for t in all_trades]
+    trade_rows = [{"exit_reason": t["exit_reason"], "pnl": t[key],
+                   "entry_time": entry_time_bucket(t.get("entry_time")),
+                   "peak": peak_bucket(trade_peak_points(t))} for t in all_trades]
+    time_order = {label: i for i, (_, label) in enumerate(ENTRY_TIME_BUCKETS)}
+    peak_order = {label: i for i, (_, label) in enumerate(PEAK_BUCKETS)}
+    # Trades that were well in profit and still closed as a loss, biggest loss first.
+    gave_back = []
+    for d in days:
+        for t in d["trades"]:
+            peak_points = trade_peak_points(t)
+            if peak_points is not None and peak_points >= GAVE_BACK_PEAK_POINTS and t[key] < 0:
+                gave_back.append({"date": d["date"], "entry_time": str(t.get("entry_time", ""))[11:16],
+                                  "exit_time": str(t.get("exit_time", ""))[11:16], "side": t.get("side", ""),
+                                  "peak_points": peak_points, "pnl_points": round(float(t.get("pnl_points") or 0), 2),
+                                  "pnl": round(t[key], 2), "exit_reason": t.get("exit_reason", "")})
+    gave_back.sort(key=lambda g: (g["pnl"], g["date"]))
     breakdowns = {
+        "entry_time": sorted(group(trade_rows, "entry_time", "pnl"), key=lambda g: time_order.get(g["label"], 9)),
+        "peak": sorted(group(trade_rows, "peak", "pnl"), key=lambda g: peak_order.get(g["label"], 9)),
         "weekday": sorted(group(daily, "weekday", "pnl"), key=lambda g: order.get(g["label"], 9)),
         "exit_reason": sorted(group(trade_rows, "exit_reason", "pnl"), key=lambda g: -g["count"]),
         "gap_type": sorted(group(daily, "gap_type", "pnl"), key=lambda g: -g["count"]),
         "cpr_type": sorted(group(daily, "cpr_type", "pnl"), key=lambda g: -g["count"]),
     }
-    return {"kpis": kpis, "daily": daily, "breakdowns": breakdowns}
+    return {"kpis": kpis, "daily": daily, "breakdowns": breakdowns,
+            "gave_back": {"peak_points": GAVE_BACK_PEAK_POINTS, "trades": gave_back,
+                          "total": round(sum(g["pnl"] for g in gave_back), 2)}}
 
 
 def collect_performance_days(log_dir: str, source: str, variant: str, settings: str,

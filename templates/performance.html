@@ -324,6 +324,13 @@
       <div class="card"><h2>By exit reason (per trade)</h2><div id="bd-exit_reason"></div></div>
       <div class="card"><h2>By gap type</h2><div id="bd-gap_type"></div></div>
       <div class="card"><h2>By CPR type</h2><div id="bd-cpr_type"></div></div>
+      <div class="card"><h2>By entry time (per trade)</h2><div id="bd-entry_time"></div></div>
+      <div class="card"><h2>By peak profit reached (points, per trade)</h2><div id="bd-peak"></div></div>
+    </div>
+
+    <div class="card">
+      <h2 id="gave-back-title">Trades that gave back a profit</h2>
+      <div id="gave-back" class="table-wrap"></div>
     </div>
 
     <div class="card">
@@ -686,7 +693,8 @@
     function render(result){
       const kpis = document.getElementById('kpis');
       const basis = document.getElementById('basis');
-      const ids = ['calendar', 'equity', 'drawdown', 'daily', 'daily-table', 'bd-weekday', 'bd-exit_reason', 'bd-gap_type', 'bd-cpr_type'];
+      const ids = ['calendar', 'equity', 'drawdown', 'daily', 'daily-table', 'bd-weekday', 'bd-exit_reason', 'bd-gap_type', 'bd-cpr_type',
+        'bd-entry_time', 'bd-peak', 'gave-back'];
       if(!result || !result.daily.length){
         kpis.replaceChildren();
         basis.textContent = '';
@@ -722,8 +730,24 @@
         {label: 'Win %', num: true, value: r => r.win_rate.toFixed(0) + '%'},
       ];
       Object.entries(result.breakdowns).forEach(([key, rows]) => {
-        document.getElementById('bd-' + key).replaceChildren(table(bdCols, rows));
+        const box = document.getElementById('bd-' + key);
+        if(box) box.replaceChildren(table(bdCols, rows));
       });
+      // Trades that were up by the threshold and still closed as a loss.
+      const gb = result.gave_back || {trades: [], peak_points: 20, total: 0};
+      document.getElementById('gave-back-title').textContent =
+        `Trades that gave back a profit (up +${gb.peak_points} points or more, closed as a loss)`;
+      document.getElementById('gave-back').replaceChildren(gb.trades.length
+        ? table([
+            {label: 'Date', value: r => r.date}, {label: 'Entry', value: r => r.entry_time},
+            {label: 'Exit', value: r => r.exit_time}, {label: 'Side', value: r => r.side},
+            {label: 'Peak (pts)', num: true, value: r => Number.isFinite(r.peak_points) ? '+' + r.peak_points.toFixed(1) : ''},
+            {label: 'Result (pts)', num: true, value: r => Number.isFinite(r.pnl_points) ? r.pnl_points.toFixed(1) : '', sign: r => r.pnl_points},
+            {label: 'P&L', num: true, value: r => fmtRs(r.pnl), sign: r => r.pnl},
+            {label: 'Exit reason', value: r => r.exit_reason},
+          ], gb.trades.concat([{date: `Total (${gb.trades.length})`, entry_time: '', exit_time: '', side: '',
+                                peak_points: NaN, pnl_points: NaN, pnl: gb.total, exit_reason: ''}]))
+        : el('div', {class: 'empty'}, 'None in this selection.'));
       document.getElementById('daily-table').replaceChildren(table([
         {label: 'Date', value: r => r.date}, {label: 'Day', value: r => r.weekday},
         {label: 'Trades', num: true, value: r => String(r.trades)},
