@@ -9,7 +9,7 @@ Two jobs run automatically on the server through `cron`:
 | **Paper vs backtest check** | `scripts/paper_vs_backtest.py` | 16:30, retry at 21:30 | Backtests the day on the downloaded data and compares it with the day's paper trades |
 
 Both skip weekends and the NSE holidays listed in `scripts/market_holidays.txt`.
-**LIVE_ORDER is never started automatically.** The auto-start can only start paper trading.
+**LIVE_ORDER starts automatically only if you switch it on** (section 3b). The paper auto-start can only start paper trading, and the live auto-start is off until you turn it on in the dashboard.
 
 ---
 
@@ -111,6 +111,39 @@ A good morning looks like this:
 | Check without starting anything | `venv/bin/python scripts/scheduled_paper_start.py v28 v30 --dry-run` |
 
 Exit codes: `0` ok or nothing to do · `1` a start failed · `2` waiting for the Kite token.
+
+---
+
+## 3b. Live auto-start (real orders, off by default)
+
+`scripts/scheduled_live_start.py` starts **one** strategy in `LIVE_ORDER` each trading morning, the same way as the dashboard's **Start LIVE_ORDER** button. It does nothing until both of these are done:
+
+1. **The cron lines are added** (one time, `crontab -e`):
+
+   ```cron
+   # Live auto-start: every 5 min from 09:00 to 12:25 IST (03:30-06:55 UTC), Mon-Fri; does nothing while the dashboard switch is Off
+   30-55/5 3 * * 1-5 cd /root/ai_algo_ui && mkdir -p logs && flock -n -o /tmp/live_autostart.lock venv/bin/python scripts/scheduled_live_start.py >> logs/scheduled_live_start.log 2>&1
+   */5 4-6 * * 1-5 cd /root/ai_algo_ui && mkdir -p logs && flock -n -o /tmp/live_autostart.lock venv/bin/python scripts/scheduled_live_start.py >> logs/scheduled_live_start.log 2>&1
+   ```
+
+2. **The switch is turned on** in the dashboard: Today panel, **Live auto-start** card, choose `v28 LIVE_ORDER` or `v30 LIVE_ORDER`, **Save**, and confirm. It stays on every trading day until you set it back to **Off**.
+
+| Situation | What happens |
+|---|---|
+| Switch Off (the default) | Nothing (`live auto-start is off`) |
+| Weekend, holiday, outside 09:00 to `NO_NEW_ENTRY_AFTER` | Nothing |
+| `market_holidays.txt` cannot be read | **Error, nothing is started** (paper trading would assume a trading day; real orders do not) |
+| Kite token not refreshed today | Waits; the next 5-minute run checks again |
+| Strategy files do not match `MANIFEST.json` | **Error, nothing is started** |
+| All checks pass, not started yet today | **Starts the chosen strategy in LIVE_ORDER** (shown in the dashboard's LIVE_ORDER card, with a working Stop button) |
+| Already started earlier today | Nothing. **A live session you stop from the dashboard is not restarted that day**, even if you change the switch. |
+
+- Only one strategy can be chosen: one strategy in LIVE_ORDER per broker account.
+- The strategy comes only from the dashboard switch (`logs/live_autostart.json` on the server); the cron line cannot name one.
+- The switch file lives on the server only. Do not upload a `logs/live_autostart.json` from your PC.
+- Check without starting anything: `venv/bin/python scripts/scheduled_live_start.py --dry-run`
+- Log: `tail -20 /root/ai_algo_ui/logs/scheduled_live_start.log`
+- To allow a second start on the same day: `rm /root/ai_algo_ui/logs/live_autostart_$(date +%F).done`
 
 ---
 

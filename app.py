@@ -1974,6 +1974,8 @@ def parse_autostart_log_today(text: str, today: str, started_markers: dict) -> d
         last = lines[-1].split("] ", 1)[-1]
         if "waiting for today's Kite token" in last:
             status = "WAITING_TOKEN"
+        elif "auto-start is off" in last:
+            status = "OFF"
         elif "market holiday" in last:
             status = "HOLIDAY"
         elif "weekend" in last:
@@ -1987,6 +1989,73 @@ def parse_autostart_log_today(text: str, today: str, started_markers: dict) -> d
         detail = last
     return {"status": status, "detail": detail, "last_check": lines[-1][1:20] if lines else "",
             "started": started_markers}
+
+
+# Live auto-start (scripts/scheduled_live_start.py, cron): off unless switched on here.
+LIVE_AUTOSTART_LOG = os.path.join(WORKDIR, "logs", "scheduled_live_start.log")
+LIVE_AUTOSTART_SETTINGS = os.path.join(WORKDIR, "logs", "live_autostart.json")
+
+
+def load_live_autostart_settings() -> dict:
+    """{"enabled", "strategy"} of the live auto-start switch; unreadable or unknown means off."""
+    try:
+        with open(LIVE_AUTOSTART_SETTINGS, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        strategy = str(data.get("strategy") or "")
+        if strategy not in TODAY_STRATEGIES:
+            return {"enabled": False, "strategy": ""}
+        return {"enabled": data.get("enabled") is True, "strategy": strategy}
+    except Exception:
+        return {"enabled": False, "strategy": ""}
+
+
+def save_live_autostart_settings(enabled: bool, strategy: str) -> dict:
+    settings = {"enabled": bool(enabled) and strategy in TODAY_STRATEGIES,
+                "strategy": strategy if strategy in TODAY_STRATEGIES else "",
+                "changed_at": ist_now_str()}
+    os.makedirs(os.path.dirname(LIVE_AUTOSTART_SETTINGS), exist_ok=True)
+    tmp = LIVE_AUTOSTART_SETTINGS + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(settings, f)
+    os.replace(tmp, LIVE_AUTOSTART_SETTINGS)
+    return load_live_autostart_settings()
+
+
+def live_autostart_status(today: str) -> dict:
+    """The switch plus what today's cron checks did (same statuses as the paper auto-start)."""
+    settings = load_live_autostart_settings()
+    markers = {}
+    marker = os.path.join(os.path.dirname(LIVE_AUTOSTART_SETTINGS), f"live_autostart_{today}.done")
+    if os.path.exists(marker):
+        try:
+            with open(marker, "r", encoding="utf-8") as f:
+                parts = f.read().split()
+            started_name = parts[1] if len(parts) > 1 and parts[1] in TODAY_STRATEGIES else "live"
+        except Exception:
+            started_name = "live"
+        markers[started_name] = datetime.fromtimestamp(os.path.getmtime(marker), IST).strftime("%H:%M")
+    status = parse_autostart_log_today(_read_tail(LIVE_AUTOSTART_LOG, 64 * 1024), today, markers)
+    if not settings["enabled"] and not markers:
+        status.update(status="OFF", detail="")
+    return {**settings, **status}
+
+
+@app.route("/api/live-autostart", methods=["GET", "POST"])
+def api_live_autostart():
+    """Read or set the live auto-start switch. Turning it on means REAL orders every trading morning."""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        strategy = str(data.get("strategy") or "")
+        enabled = data.get("enabled") is True
+        if enabled and strategy not in TODAY_STRATEGIES:
+            return jsonify({"ok": False, "msg": "choose v28 or v30"}), 400
+        if strategy and strategy not in TODAY_STRATEGIES:
+            return jsonify({"ok": False, "msg": "unknown strategy"}), 400
+        try:
+            save_live_autostart_settings(enabled, strategy)
+        except Exception as exc:
+            return jsonify({"ok": False, "msg": f"could not save: {exc}"}), 500
+    return jsonify({"ok": True, "live_autostart": live_autostart_status(datetime.now(IST).date().isoformat())})
 
 
 PARITY_SCRIPT = os.path.join(WORKDIR, "scripts", "paper_vs_backtest.py")
@@ -2126,8 +2195,12 @@ def api_today():
         parity_run = parity_run_status()
     except Exception:
         parity_run = {"running": False}
+    try:
+        live_autostart = live_autostart_status(today)
+    except Exception:
+        live_autostart = {"enabled": False, "strategy": "", "status": "OFF", "detail": ""}
     return jsonify({"ok": True, "date": today, "token": kite_token_status(), "autostart": autostart,
-                    "strategies": strategies, "download": download, "parity": parity, "parity_run": parity_run})
+                    "live_autostart": live_autostart, "strategies": strategies, "download": download, "parity": parity, "parity_run": parity_run})
 
 
 # ---------------------------------------------------------------------------

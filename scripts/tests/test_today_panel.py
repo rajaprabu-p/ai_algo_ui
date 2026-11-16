@@ -140,6 +140,48 @@ class RunModeAndPaperExcelTests(unittest.TestCase):
         self.assertEqual(bt["settings"], "mtf5min_mfe_max2_sl25 (csv)")
 
 
+class LiveAutostartSwitchTests(unittest.TestCase):
+    def test_switch_is_off_by_default_and_needs_a_strategy(self):
+        import tempfile
+        from datetime import datetime
+        from unittest import mock
+
+        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+
+        client = webapp.app.test_client()
+        self.assertEqual(client.get("/api/live-autostart").status_code, 401)
+        self.assertEqual(client.post("/api/live-autostart", json={"enabled": True, "strategy": "v30"}).status_code, 401)
+        with client.session_transaction() as s:
+            s["logged_in"] = True
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = os.path.join(tmp, "live_autostart.json")
+            with mock.patch.object(webapp, "LIVE_AUTOSTART_SETTINGS", settings), \
+                    mock.patch.object(webapp, "LIVE_AUTOSTART_LOG", os.path.join(tmp, "scheduled_live_start.log")):
+                live = client.get("/api/live-autostart").get_json()["live_autostart"]
+                self.assertEqual((live["enabled"], live["strategy"], live["status"]), (False, "", "OFF"))
+                self.assertFalse(os.path.exists(settings))                      # reading never creates the switch
+                for bad in ({"enabled": True}, {"enabled": True, "strategy": "v99"}, {"enabled": False, "strategy": "x"}):
+                    self.assertEqual(client.post("/api/live-autostart", json=bad).status_code, 400)
+                self.assertFalse(os.path.exists(settings))
+                # "enabled" must be exactly true
+                live = client.post("/api/live-autostart", json={"enabled": "yes", "strategy": "v30"}).get_json()["live_autostart"]
+                self.assertFalse(live["enabled"])
+                live = client.post("/api/live-autostart", json={"enabled": True, "strategy": "v30"}).get_json()["live_autostart"]
+                self.assertEqual((live["enabled"], live["strategy"], live["status"]), (True, "v30", "NOT_RUN"))
+                # the cron script reads the same file
+                import scheduled_live_start as sls
+                self.assertEqual(sls.load_settings(Path(settings)), {"enabled": True, "strategy": "v30"})
+                self.assertEqual(client.get("/api/today").get_json()["live_autostart"]["strategy"], "v30")
+                # started today: shown as started with the strategy from the marker
+                Path(tmp, f"live_autostart_{TODAY}.done").write_text("2026 v30 started:1\n", encoding="utf-8")
+                today = datetime.now(webapp.IST).date().isoformat()
+                Path(tmp, f"live_autostart_{today}.done").write_text("2026 v30 started:1\n", encoding="utf-8")
+                live = client.get("/api/live-autostart").get_json()["live_autostart"]
+                self.assertEqual((live["status"], list(live["started"])), ("STARTED", ["v30"]))
+                live = client.post("/api/live-autostart", json={"enabled": False, "strategy": ""}).get_json()["live_autostart"]
+                self.assertEqual((live["enabled"], live["strategy"]), (False, ""))
+
+
 class AutostartParserTests(unittest.TestCase):
     def test_statuses(self):
         def status(lines, markers=None):
@@ -151,6 +193,7 @@ class AutostartParserTests(unittest.TestCase):
         self.assertEqual(status([f"[{TODAY} 08:55:00 IST] outside the start window 09:00-12:00 IST: nothing to do"]), "OUTSIDE_WINDOW")
         self.assertEqual(status([f"[{TODAY} 09:00:03 IST] ERROR: v28: start failed: boom"]), "ERROR")
         self.assertEqual(status(["[2026-11-08 09:00:01 IST] waiting for today's Kite token"]), "NOT_RUN")  # other day
+        self.assertEqual(status([f"[{TODAY} 09:00:01 IST] live auto-start is off: nothing to do"]), "OFF")
         started = webapp.parse_autostart_log_today("", TODAY, {"v28": "09:00", "v30": "09:00"})
         self.assertEqual(started["status"], "STARTED")
         self.assertIn("v28 at 09:00", started["detail"])

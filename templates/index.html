@@ -242,7 +242,7 @@
       .today-muted { color: #475569; }
       .today-fold > summary { cursor: pointer; }
       .today-run { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-top: 0.45rem; }
-      .today-run input[type=date] { font: inherit; padding: 0.2rem 0.3rem; }
+      .today-run input[type=date], .today-run select { font: inherit; padding: 0.2rem 0.3rem; }
       .today-run button { margin: 0; padding: 0.25rem 0.6rem; font-size: 0.85rem; }
       .today-fold > div.row { margin-left: 1rem; font-size: 0.85rem; white-space: pre-line; }
       .status-running { color: #166534; font-weight: 700; }
@@ -1271,8 +1271,52 @@
         STARTED: ['Started', 'today-ok'], WAITING_TOKEN: ['Waiting for Kite login', 'today-warn'],
         HOLIDAY: ['Market holiday', 'today-muted'], WEEKEND: ['Weekend', 'today-muted'],
         OUTSIDE_WINDOW: ['Outside start window', 'today-muted'], NOT_RUN: ['Not run yet today', 'today-muted'],
-        ERROR: ['Error', 'today-bad'], CHECKED: ['Checked', 'today-muted'],
+        ERROR: ['Error', 'today-bad'], CHECKED: ['Checked', 'today-muted'], OFF: ['Off', 'today-muted'],
       };
+
+      // Live auto-start switch (Off / v28 / v30). The choice being edited survives the 15 s refresh.
+      let liveAutostartChoice = null;
+      async function saveLiveAutostart(choice, button){
+        if(choice && !confirm(
+          'Turn ON live auto-start for ' + choice.toUpperCase() + '?\n\n' +
+          'LIVE_ORDER will start by itself every trading morning after the Kite login ' +
+          'and place REAL orders, without asking again. It stays on until you switch it off here.')) return;
+        button.disabled = true;
+        try {
+          const r = await fetch('/api/live-autostart', {method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: !!choice, strategy: choice || ''})});
+          const j = await r.json().catch(() => ({}));
+          if(!r.ok || !j.ok) alert('Could not save the live auto-start switch: ' + (j.msg || ('HTTP ' + r.status)));
+          else liveAutostartChoice = null;
+        } catch(error) {
+          alert('Could not save the live auto-start switch: ' + error.message);
+        }
+        loadTodayPanel();
+      }
+
+      function liveAutostartControls(live){
+        const current = live.enabled ? live.strategy : '';
+        const controls = document.createElement('div');
+        controls.className = 'today-run';
+        const select = document.createElement('select');
+        select.id = 'live-autostart-select';
+        [['', 'Off'], ['v28', 'v28 LIVE_ORDER'], ['v30', 'v30 LIVE_ORDER']].forEach(([value, label]) => {
+          const option = document.createElement('option');
+          option.value = value; option.textContent = label;
+          select.appendChild(option);
+        });
+        select.value = liveAutostartChoice === null ? current : liveAutostartChoice;
+        const button = document.createElement('button');
+        button.textContent = 'Save';
+        button.disabled = select.value === current;
+        select.addEventListener('change', () => {
+          liveAutostartChoice = select.value === current ? null : select.value;
+          button.disabled = select.value === current;
+        });
+        button.addEventListener('click', () => saveLiveAutostart(select.value, button));
+        controls.append(select, button);
+        return controls;
+      }
       const DOWNLOAD_LABELS = {
         OK: ['OK', 'today-ok'], FAILED: ['FAILED', 'today-bad'], LOGIN_FAILED: ['Kite login failed', 'today-bad'],
         RUNNING: ['Running', 'today-warn'], INCOMPLETE: ['Incomplete', 'today-warn'],
@@ -1336,7 +1380,7 @@
       async function loadTodayPanel(){
         const grid = document.getElementById('today-grid');
         // Do not rebuild the cards while the check's date picker is in use.
-        if(document.activeElement && document.activeElement.id === 'parity-run-date') return;
+        if(document.activeElement && ['parity-run-date', 'live-autostart-select'].includes(document.activeElement.id)) return;
         const updated = document.getElementById('today-updated');
         let j;
         try {
@@ -1361,6 +1405,18 @@
         if(a.detail) aRows.push(['', a.detail, 'today-muted']);
         if(a.last_check) aRows.push(['Last check', a.last_check.slice(11), 'today-muted']);
         cards.push(todayCard('Paper auto-start', aRows));
+
+        const live = j.live_autostart || {enabled: false, strategy: '', status: 'OFF'};
+        const [lLabel, lCls] = AUTOSTART_LABELS[live.status] || [live.status || '-', 'today-muted'];
+        const lRows = [['', live.enabled ? 'ON: ' + live.strategy + ' places real orders' : 'Off',
+                        live.enabled ? 'today-warn' : 'today-muted']];
+        if(live.enabled || live.status === 'STARTED'){
+          lRows.push(['Today', lLabel, lCls]);
+          if(live.detail) lRows.push(['', live.detail, 'today-muted']);
+          if(live.last_check) lRows.push(['Last check', live.last_check.slice(11), 'today-muted']);
+        }
+        cards.push(todayCard('Live auto-start', lRows));
+        cards[cards.length - 1].appendChild(liveAutostartControls(live));
 
         const d = j.download;
         if(d){
