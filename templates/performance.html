@@ -230,6 +230,9 @@
     </label>
     <label>From <input type="date" id="from" /></label>
     <label>To <input type="date" id="to" /></label>
+    <label title="Capital kept for 1 lot; used for the return and drawdown percentages">Capital (₹)
+      <input type="number" id="capital" min="1000" step="1000" value="25000" style="width:7.5em" />
+    </label>
     <label id="source-label">Source
       <select id="source"><option value="backtest">Backtest</option><option value="paper">Paper trading</option><option value="live">Live trading</option></select>
     </label>
@@ -690,7 +693,17 @@
       content.classList.remove('loading');
     }
 
+    // Capital kept for 1 lot (default ₹25,000; remembered in this browser).
+    const DEFAULT_CAPITAL = 25000;
+    function capital(){
+      const n = Number(document.getElementById('capital').value);
+      return Number.isFinite(n) && n > 0 ? n : DEFAULT_CAPITAL;
+    }
+    const fmtPct = n => (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n).toFixed(1) + '%';
+    let lastResult = null;
+
     function render(result){
+      lastResult = result;
       const kpis = document.getElementById('kpis');
       const basis = document.getElementById('basis');
       const ids = ['calendar', 'equity', 'drawdown', 'daily', 'daily-table', 'bd-weekday', 'bd-exit_reason', 'bd-gap_type', 'bd-cpr_type',
@@ -715,7 +728,10 @@
         tile('Profit factor', k.profit_factor === null ? '—' : k.profit_factor.toFixed(2), '', 'gross wins ÷ gross losses'),
         tile('Max drawdown', fmtRs(k.max_drawdown), k.max_drawdown < 0 ? 'bad' : '', `worst day ${fmtRs(k.worst_day)}`),
         tile('Avg per trade', fmtRs(k.avg_per_trade), k.avg_per_trade >= 0 ? 'good' : 'bad', `best day ${fmtRs(k.best_day)}`),
-        tile('Trading days', String(k.trading_days), '', `${k.losing_days} losing day(s)`)
+        tile('Trading days', String(k.trading_days), '', `${k.losing_days} losing day(s)`),
+        tile('Return on capital', fmtPct(100 * k.net_pnl / capital()), k.net_pnl >= 0 ? 'good' : 'bad',
+             `on ${fmtPlain(capital())} · max drawdown ${fmtPct(100 * k.max_drawdown / capital())}` +
+             (k.trading_days ? ` · ${fmtPct(100 * k.net_pnl / k.trading_days * 21 / capital())} per 21 trading days` : ''))
       );
       renderCalendar(result.daily);
       lineChart(document.getElementById('equity'), result.daily, 'equity', '--gain', false);
@@ -1156,6 +1172,11 @@
     document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
     document.querySelectorAll('.cmp-settings').forEach(s => s.addEventListener('change', () => load()));
     document.getElementById('include-late').addEventListener('change', () => load());
+    try { const c = Number(localStorage.getItem('perfCapital')); if(c > 0) document.getElementById('capital').value = c; } catch(e) {}
+    document.getElementById('capital').addEventListener('change', () => {
+      try { localStorage.setItem('perfCapital', String(capital())); } catch(e) {}
+      if(view === 'single' && lastResult) render(lastResult);
+    });
 
     document.querySelectorAll('[data-preset]').forEach(btn => btn.addEventListener('click', () => {
       preset = btn.dataset.preset;
