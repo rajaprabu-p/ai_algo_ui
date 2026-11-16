@@ -2241,6 +2241,39 @@ def peak_bucket(points) -> str:
     return PEAK_LAST_BUCKET
 
 
+ROLLING_DAYS = 10
+TRADE_NUMBER_LABELS = ["1st trade of the day", "2nd trade of the day", "3rd or later"]
+
+
+def longest_run(flags) -> int:
+    """Longest run of consecutive True values."""
+    best = run = 0
+    for flag in flags:
+        run = run + 1 if flag else 0
+        best = max(best, run)
+    return best
+
+
+def drawdown_recovery(daily: list) -> dict:
+    """The worst drawdown: when it started, its lowest day, and how many trading days it took
+    to get back to the earlier peak (recovery_days None = not recovered yet)."""
+    equity = peak = worst = 0.0
+    peak_i, worst_peak_i, trough_i = -1, -1, None
+    for i, d in enumerate(daily):
+        equity = d["equity"]
+        if equity > peak:
+            peak, peak_i = equity, i
+        if equity - peak < worst:
+            worst, worst_peak_i, trough_i = equity - peak, peak_i, i
+    if trough_i is None:
+        return {"trough_date": "", "recovery_days": 0, "recovered": True}
+    peak_value = daily[worst_peak_i]["equity"] if worst_peak_i >= 0 else 0.0
+    for i in range(trough_i + 1, len(daily)):
+        if daily[i]["equity"] >= peak_value:
+            return {"trough_date": daily[trough_i]["date"], "recovery_days": i - worst_peak_i, "recovered": True}
+    return {"trough_date": daily[trough_i]["date"], "recovery_days": None, "recovered": False}
+
+
 def compute_performance(days: list, basis: str = "") -> dict:
     """KPIs, equity curve, drawdown and breakdowns from per-day trade lists (pure function).
 
@@ -2269,11 +2302,18 @@ def compute_performance(days: list, basis: str = "") -> dict:
             "entry_price": t.get("entry_price"), "exit_price": t.get("exit_price"),
             "pnl_points": t.get("pnl_points"), "pnl": round(t[key], 2), "exit_reason": t.get("exit_reason", ""),
         } for t in sorted(d["trades"], key=lambda t: str(t.get("entry_time", "")))]
+        rolling = round(pnl + sum(x["pnl"] for x in daily[-(ROLLING_DAYS - 1):]), 2)   # this day + the 9 before
         daily.append({"date": d["date"], "weekday": weekday, "pnl": pnl, "equity": equity, "drawdown": drawdown,
+                      "rolling": rolling,
                       "trades": len(d["trades"]), "gap_type": d.get("gap_type") or "", "cpr_type": d.get("cpr_type") or "",
                       "trade_list": trade_list})
 
     pnls = [t[key] for t in all_trades]
+    # Trades in time order (day, then entry time) with their number within the day.
+    ordered = []
+    for d in days:
+        for number, t in enumerate(sorted(d["trades"], key=lambda t: str(t.get("entry_time", "")))):
+            ordered.append((t, TRADE_NUMBER_LABELS[min(number, len(TRADE_NUMBER_LABELS) - 1)]))
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p <= 0]
     gross_loss = -sum(losses)
@@ -2289,6 +2329,10 @@ def compute_performance(days: list, basis: str = "") -> dict:
         "best_day": max((d["pnl"] for d in daily), default=0.0),
         "worst_day": min((d["pnl"] for d in daily), default=0.0),
         "losing_days": sum(1 for d in daily if d["pnl"] < 0),
+        "longest_losing_days": longest_run(d["pnl"] < 0 for d in daily),
+        "longest_losing_trades": longest_run(t[key] <= 0 for t, _ in ordered),
+        "drawdown_recovery": drawdown_recovery(daily),
+        "rolling_days": ROLLING_DAYS,
         "charges": round(sum(t["pnl_rs"] - t["net_pnl_rs"] for t in all_trades), 2) if basis == "net" else None,
     }
 
@@ -2307,6 +2351,8 @@ def compute_performance(days: list, basis: str = "") -> dict:
         return result
 
     order = {d: i for i, d in enumerate(_WEEKDAYS)}
+    number_rows = [{"trade_number": label, "side": t.get("side") or "", "pnl": t[key]} for t, label in ordered]
+    number_order = {label: i for i, label in enumerate(TRADE_NUMBER_LABELS)}
     trade_rows = [{"exit_reason": t["exit_reason"], "pnl": t[key],
                    "entry_time": entry_time_bucket(t.get("entry_time")),
                    "peak": peak_bucket(trade_peak_points(t))} for t in all_trades]
@@ -2324,6 +2370,8 @@ def compute_performance(days: list, basis: str = "") -> dict:
                                   "pnl": round(t[key], 2), "exit_reason": t.get("exit_reason", "")})
     gave_back.sort(key=lambda g: (g["pnl"], g["date"]))
     breakdowns = {
+        "trade_number": sorted(group(number_rows, "trade_number", "pnl"), key=lambda g: number_order.get(g["label"], 9)),
+        "side": sorted(group(number_rows, "side", "pnl"), key=lambda g: g["label"]),
         "entry_time": sorted(group(trade_rows, "entry_time", "pnl"), key=lambda g: time_order.get(g["label"], 9)),
         "peak": sorted(group(trade_rows, "peak", "pnl"), key=lambda g: peak_order.get(g["label"], 9)),
         "weekday": sorted(group(daily, "weekday", "pnl"), key=lambda g: order.get(g["label"], 9)),

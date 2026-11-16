@@ -322,11 +322,18 @@
       </div>
     </div>
 
+    <div class="card">
+      <h2 id="rolling-title">Last 10 trading days P&amp;L (rolling)</h2>
+      <div id="rolling" class="chart" role="img" aria-label="Rolling profit and loss"></div>
+    </div>
+
     <div class="grid-bd">
       <div class="card"><h2>By weekday</h2><div id="bd-weekday"></div></div>
       <div class="card"><h2>By exit reason (per trade)</h2><div id="bd-exit_reason"></div></div>
       <div class="card"><h2>By gap type</h2><div id="bd-gap_type"></div></div>
       <div class="card"><h2>By CPR type</h2><div id="bd-cpr_type"></div></div>
+      <div class="card"><h2>By trade number (per trade)</h2><div id="bd-trade_number"></div></div>
+      <div class="card"><h2>By side (per trade)</h2><div id="bd-side"></div></div>
       <div class="card"><h2>By entry time (per trade)</h2><div id="bd-entry_time"></div></div>
       <div class="card"><h2>By peak profit reached (points, per trade)</h2><div id="bd-peak"></div></div>
     </div>
@@ -337,7 +344,12 @@
     </div>
 
     <div class="card">
-      <h2>Daily results (table view)</h2>
+      <h2>Daily results (table view)
+        <span style="float:right; display:flex; gap:6px">
+          <button type="button" id="csv-days">Download days (CSV)</button>
+          <button type="button" id="csv-trades">Download trades (CSV)</button>
+        </span>
+      </h2>
       <div id="daily-table" class="table-wrap"></div>
     </div>
   </div>
@@ -707,7 +719,7 @@
       const kpis = document.getElementById('kpis');
       const basis = document.getElementById('basis');
       const ids = ['calendar', 'equity', 'drawdown', 'daily', 'daily-table', 'bd-weekday', 'bd-exit_reason', 'bd-gap_type', 'bd-cpr_type',
-        'bd-entry_time', 'bd-peak', 'gave-back'];
+        'bd-entry_time', 'bd-peak', 'gave-back', 'rolling', 'bd-trade_number', 'bd-side'];
       if(!result || !result.daily.length){
         kpis.replaceChildren();
         basis.textContent = '';
@@ -731,12 +743,20 @@
         tile('Trading days', String(k.trading_days), '', `${k.losing_days} losing day(s)`),
         tile('Return on capital', fmtPct(100 * k.net_pnl / capital()), k.net_pnl >= 0 ? 'good' : 'bad',
              `on ${fmtPlain(capital())} · max drawdown ${fmtPct(100 * k.max_drawdown / capital())}` +
-             (k.trading_days ? ` · ${fmtPct(100 * k.net_pnl / k.trading_days * 21 / capital())} per 21 trading days` : ''))
+             (k.trading_days ? ` · ${fmtPct(100 * k.net_pnl / k.trading_days * 21 / capital())} per 21 trading days` : '')),
+        tile('Longest losing run', `${k.longest_losing_days} day(s)`, '',
+             `${k.longest_losing_trades} losing trade(s) in a row · worst drawdown ` +
+             (k.max_drawdown >= 0 ? 'none'
+               : k.drawdown_recovery.recovered ? `recovered in ${k.drawdown_recovery.recovery_days} trading day(s)`
+               : `not recovered yet (low on ${k.drawdown_recovery.trough_date})`))
       );
       renderCalendar(result.daily);
       lineChart(document.getElementById('equity'), result.daily, 'equity', '--gain', false);
       lineChart(document.getElementById('drawdown'), result.daily, 'drawdown', '--loss', true);
       barChart(document.getElementById('daily'), result.daily);
+      document.getElementById('rolling-title').textContent =
+        `Last ${k.rolling_days} trading days P&L (rolling; the first days use the days so far)`;
+      lineChart(document.getElementById('rolling'), result.daily, 'rolling', '--accent', false);
 
       const bdCols = [
         {label: '', value: r => r.label},
@@ -1172,6 +1192,32 @@
     document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
     document.querySelectorAll('.cmp-settings').forEach(s => s.addEventListener('change', () => load()));
     document.getElementById('include-late').addEventListener('change', () => load());
+
+    // CSV download of the current selection (single view): one row per day, or one row per trade.
+    function downloadCsv(name, header, rows){
+      const cell = v => { const s = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+      const text = [header].concat(rows).map(r => r.map(cell).join(',')).join('\r\n') + '\r\n';
+      const a = el('a', {href: URL.createObjectURL(new Blob([text], {type: 'text/csv'})), download: name});
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+    function csvName(kind){
+      const part = id => String(document.getElementById(id).value || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      return ['performance', kind, part('source'), part('variant'), part('settings')].filter(Boolean).join('_') + '.csv';
+    }
+    document.getElementById('csv-days').addEventListener('click', () => {
+      if(!lastResult || !lastResult.daily.length) return;
+      downloadCsv(csvName('days'), ['date', 'weekday', 'trades', 'pnl', 'equity', 'drawdown', 'gap_type', 'cpr_type'],
+        lastResult.daily.map(d => [d.date, d.weekday, d.trades, d.pnl, d.equity, d.drawdown, d.gap_type, d.cpr_type]));
+    });
+    document.getElementById('csv-trades').addEventListener('click', () => {
+      if(!lastResult || !lastResult.daily.length) return;
+      const rows = [];
+      lastResult.daily.forEach(d => d.trade_list.forEach(t => rows.push(
+        [d.date, t.entry_time, t.exit_time, t.side, t.symbol, t.entry_price, t.exit_price, t.pnl_points, t.pnl, t.exit_reason])));
+      downloadCsv(csvName('trades'), ['date', 'entry_time', 'exit_time', 'side', 'symbol', 'entry_price', 'exit_price',
+                                      'pnl_points', 'pnl', 'exit_reason'], rows);
+    });
     try { const c = Number(localStorage.getItem('perfCapital')); if(c > 0) document.getElementById('capital').value = c; } catch(e) {}
     document.getElementById('capital').addEventListener('change', () => {
       try { localStorage.setItem('perfCapital', String(capital())); } catch(e) {}

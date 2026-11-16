@@ -213,6 +213,40 @@ class EntryTimeAndPeakTests(unittest.TestCase):
         self.assertEqual(webapp.compute_performance([{"date": "2026-10-05", "trades": [t(-500)]}])["gave_back"]["trades"], [])
 
 
+class StreakAndRollingTests(unittest.TestCase):
+    def test_longest_run_and_recovery(self):
+        self.assertEqual(webapp.longest_run([True, False, True, True, False]), 2)
+        self.assertEqual(webapp.longest_run([]), 0)
+        days = [{"date": f"2026-10-{n:02d}", "trades": [t(p, entry=f"2026-10-{n:02d} 09:30:00")]}
+                for n, p in ((5, 1000), (6, -400), (7, -300), (8, 200), (9, 600), (12, -100))]
+        r = webapp.compute_performance(days)
+        k = r["kpis"]
+        self.assertEqual((k["longest_losing_days"], k["longest_losing_trades"], k["max_drawdown"]), (2, 2, -700))
+        # peak on the 5th, low on the 7th, back above the peak on the 9th: 4 trading days after the peak
+        self.assertEqual(k["drawdown_recovery"], {"trough_date": "2026-10-07", "recovery_days": 4, "recovered": True})
+        self.assertEqual([d["rolling"] for d in r["daily"]], [1000, 600, 300, 500, 1100, 1000])
+        # still under water at the end
+        k2 = webapp.compute_performance(days[:3])["kpis"]
+        self.assertEqual((k2["drawdown_recovery"]["recovered"], k2["drawdown_recovery"]["recovery_days"]), (False, None))
+        # a first-day loss counts from the start
+        k3 = webapp.compute_performance([days[1], days[4]])["kpis"]
+        self.assertEqual(k3["drawdown_recovery"]["recovery_days"], 2)
+
+    def test_rolling_uses_ten_days(self):
+        days = [{"date": f"2026-10-{n:02d}", "trades": [t(100, entry=f"2026-10-{n:02d} 09:30:00")]} for n in range(1, 13)]
+        self.assertEqual([d["rolling"] for d in webapp.compute_performance(days)["daily"]][-3:], [1000, 1000, 1000])
+
+    def test_trade_number_and_side(self):
+        def trade(entry, side, pnl):
+            return dict(t(pnl, entry=entry), side=side)
+        days = [{"date": "2026-11-16", "trades": [trade("2026-11-16 09:44:00", "CE", 910.0), trade("2026-11-16 09:24:00", "PE", -1690.0)]},
+                {"date": "2026-11-17", "trades": [trade("2026-11-17 09:30:00", "CE", 500.0)]}]
+        b = webapp.compute_performance(days)["breakdowns"]
+        self.assertEqual([(g["label"], g["count"], g["total"]) for g in b["trade_number"]],
+                         [("1st trade of the day", 2, -1190.0), ("2nd trade of the day", 1, 910.0)])
+        self.assertEqual([(g["label"], g["count"], g["total"]) for g in b["side"]], [("CE", 2, 1410.0), ("PE", 1, -1690.0)])
+
+
 class CompareSettingsTests(unittest.TestCase):
     def test_common_days_and_basis(self):
         with_mfe = [{"date": "2026-11-11", "trades": [t(1000.0, 920.0)]}, {"date": "2026-11-12", "trades": [t(-500.0, -580.0)]}]
