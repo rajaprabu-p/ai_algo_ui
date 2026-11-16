@@ -2495,6 +2495,9 @@ def api_performance():
 PAPER_LATE_START_AFTER = "09:20"   # a paper session that started after this missed part of the day
 
 
+PERFORMANCE_PAIRS = ["paper-backtest", "live-backtest", "live-paper"]   # "<actual>-<reference>"
+
+
 def compare_paper_backtest(paper_days: list, backtest_days: list, include_late: bool = False) -> dict:
     """Paper vs backtest on the days both have (pure function).
 
@@ -2584,35 +2587,45 @@ def api_performance_compare_settings():
 
 @app.route("/api/performance/paper-vs-backtest")
 def api_performance_paper_vs_backtest():
-    """One strategy's paper trading against its backtest, on the days both exist."""
+    """One strategy's paper (or live) trading against its backtest (or paper), on the days both exist.
+
+    pair = paper-backtest (default), live-backtest or live-paper: "<actual>-<reference>". The
+    names in the query and the answer stay paper_* for the actual side and backtest_* for the
+    reference side, whichever sources the pair picks.
+    """
     log_dir = LOGS_DIR
     if not os.path.isdir(log_dir):
         return jsonify({"ok": True, "groups": [], "selected": None, "comparison": None})
     group_list = performance_groups(log_dir)
     variant = request.args.get("variant", "v28")
     date_from, date_to = _date_arg("from"), _date_arg("to")
+    pair = request.args.get("pair", "")
+    if pair not in PERFORMANCE_PAIRS:
+        pair = PERFORMANCE_PAIRS[0]
+    actual, reference = pair.split("-")
 
-    paper_groups = [g for g in group_list if g["source"] == "paper" and g["variant"] == variant]
+    paper_groups = [g for g in group_list if g["source"] == actual and g["variant"] == variant]
     paper_settings = request.args.get("paper_settings", "")
     if not any(g["settings"] == paper_settings for g in paper_groups):
         paper_groups.sort(key=lambda g: (g["days"], g["last"]), reverse=True)
         paper_settings = paper_groups[0]["settings"] if paper_groups else ""
-    paper_days = collect_performance_days(log_dir, "paper", variant, paper_settings, date_from, date_to) if paper_settings else []
+    paper_days = collect_performance_days(log_dir, actual, variant, paper_settings, date_from, date_to) if paper_settings else []
 
-    backtest_groups = [g for g in group_list if g["source"] == "backtest" and g["variant"] == variant]
+    backtest_groups = [g for g in group_list if g["source"] == reference and g["variant"] == variant]
     backtest_settings = request.args.get("backtest_settings", "")
     if not any(g["settings"] == backtest_settings for g in backtest_groups):
         # Default: the backtest with the paper's settings, downloaded CSVs first, then the most days.
         backtest_groups.sort(key=lambda g: (g["settings"].split(" (")[0] == paper_settings,
                                             g["settings"].endswith("(csv)"), g["days"], g["last"]), reverse=True)
         backtest_settings = backtest_groups[0]["settings"] if backtest_groups else ""
-    backtest_days = (collect_performance_days(log_dir, "backtest", variant, backtest_settings, date_from, date_to)
+    backtest_days = (collect_performance_days(log_dir, reference, variant, backtest_settings, date_from, date_to)
                      if backtest_settings else [])
 
     include_late = request.args.get("include_late") == "1"
     comparison = compare_paper_backtest(paper_days, backtest_days, include_late) if paper_days and backtest_days else None
     return jsonify({"ok": True, "groups": group_list,
-                    "selected": {"variant": variant, "paper_settings": paper_settings, "include_late": include_late,
+                    "selected": {"variant": variant, "pair": pair, "actual": actual, "reference": reference,
+                                 "paper_settings": paper_settings, "include_late": include_late,
                                  "backtest_settings": backtest_settings, "from": date_from, "to": date_to},
                     "comparison": comparison})
 

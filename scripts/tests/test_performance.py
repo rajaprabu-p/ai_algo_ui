@@ -247,6 +247,45 @@ class StreakAndRollingTests(unittest.TestCase):
         self.assertEqual([(g["label"], g["count"], g["total"]) for g in b["side"]], [("CE", 2, 1410.0), ("PE", 1, -1690.0)])
 
 
+class LiveComparisonTests(unittest.TestCase):
+    def test_pairs(self):
+        import shutil
+        import tempfile
+        from unittest import mock
+
+        import pandas as pd
+
+        tmp = tempfile.mkdtemp(prefix="perf_live_")
+        try:
+            def write(name, sheet, pnl):
+                row = {"entry_time": "2026-11-27 09:30:00", "exit_time": "2026-11-27 09:45:00", "side": "CE",
+                       "option_symbol": "X", "exit_reason": "TRAILING_STOP_HIT", "pnl_rs": pnl, "pnl_points": pnl / 65}
+                with pd.ExcelWriter(Path(tmp) / name) as xw:
+                    pd.DataFrame([row]).to_excel(xw, sheet_name=sheet, index=False)
+            write("livetrade_27112026_090012_mtf5min_mfe_max2_sl25_v30.xlsx", "live_trade_events", 900.0)
+            write("papertrade_27112026_090012_mtf5min_mfe_max2_sl25_v30.xlsx", "live_trade_events", 965.0)
+            write("backtest_27112026_mtf5min_mfe_max2_sl25_v30_csv.xlsx", "trades", 910.0)
+            user = webapp.app.test_client()
+            with user.session_transaction() as s:
+                s["logged_in"] = True
+            with mock.patch.object(webapp, "LOGS_DIR", tmp):
+                def get(pair):
+                    j = user.get(f"/api/performance/paper-vs-backtest?variant=v30&pair={pair}").get_json()
+                    c = j["comparison"]
+                    return (j["selected"]["actual"], j["selected"]["reference"],
+                            c["paper"]["kpis"]["net_pnl"], c["backtest"]["kpis"]["net_pnl"])
+                self.assertEqual(get("live-backtest"), ("live", "backtest", 900.0, 910.0))
+                self.assertEqual(get("live-paper"), ("live", "paper", 900.0, 965.0))
+                self.assertEqual(get("paper-backtest"), ("paper", "backtest", 965.0, 910.0))
+                self.assertEqual(get("nonsense")[:2], ("paper", "backtest"))        # unknown pair: the default
+                # v28 has no live results: nothing to compare, no error
+                none = user.get("/api/performance/paper-vs-backtest?variant=v28&pair=live-backtest").get_json()
+                self.assertEqual((none["selected"]["paper_settings"], none["comparison"]), ("", None))
+        finally:
+            webapp._PERF_CACHE.clear()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class CompareSettingsTests(unittest.TestCase):
     def test_common_days_and_basis(self):
         with_mfe = [{"date": "2026-11-11", "trades": [t(1000.0, 920.0)]}, {"date": "2026-11-12", "trades": [t(-500.0, -580.0)]}]

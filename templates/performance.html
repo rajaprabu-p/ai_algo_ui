@@ -242,7 +242,7 @@
       <span style="display:flex; gap:4px">
         <button type="button" data-view="single" class="active">One strategy</button>
         <button type="button" data-view="compare">Compare v28 vs v30</button>
-        <button type="button" data-view="pvb">Paper vs backtest</button>
+        <button type="button" data-view="pvb">Paper / live vs backtest</button>
         <button type="button" data-view="cs">Compare settings</button>
       </span>
     </label>
@@ -258,10 +258,17 @@
     <label class="compare-only" hidden>v30 settings
       <select id="settings-v30" class="cmp-settings"></select>
     </label>
-    <label class="pvb-only" hidden>Backtest settings
+    <label class="pvb-only" hidden>Compare
+      <select id="pvb-pair">
+        <option value="paper-backtest">Paper vs backtest</option>
+        <option value="live-backtest">Live vs backtest</option>
+        <option value="live-paper">Live vs paper</option>
+      </select>
+    </label>
+    <label class="pvb-only" hidden><span id="pvb-reference-label">Backtest settings</span>
       <select id="settings-backtest" class="cmp-settings pvb-settings"></select>
     </label>
-    <label class="pvb-only" hidden>Paper settings
+    <label class="pvb-only" hidden><span id="pvb-actual-label">Paper settings</span>
       <select id="settings-paper" class="cmp-settings pvb-settings"></select>
     </label>
     <label class="cs-only" hidden>Settings A
@@ -271,7 +278,7 @@
       <select id="settings-b" class="cmp-settings"></select>
     </label>
     <label class="pvb-only pvb-check" hidden>
-      <span><input type="checkbox" id="include-late" /> Include days paper started late or restarted (after 09:20)</span>
+      <span><input type="checkbox" id="include-late" /> <span id="include-late-text">Include days paper started late or restarted (after 09:20)</span></span>
     </label>
   </div>
   <div id="basis" class="basis"></div>
@@ -870,6 +877,7 @@
         paper_settings: keepSettings ? (document.getElementById('settings-paper').value || '') : '',
         backtest_settings: keepSettings ? (document.getElementById('settings-backtest').value || '') : '',
         include_late: document.getElementById('include-late').checked ? '1' : '0',
+        pair: document.getElementById('pvb-pair').value,
       });
       let j;
       try {
@@ -883,33 +891,43 @@
       }
       groups = j.groups || [];
       const sel = j.selected || {};
-      fillSettingsFrom('settings-backtest', 'backtest', variant, sel.backtest_settings);
-      fillSettingsFrom('settings-paper', 'paper', variant, sel.paper_settings);
-      document.getElementById('cmp-title').textContent = `${variant}: backtest vs paper`;
+      // The actual side (paper or live) against the reference side (backtest or paper).
+      const actual = sel.actual || 'paper', reference = sel.reference || 'backtest';
+      const Actual = actual[0].toUpperCase() + actual.slice(1), Reference = reference[0].toUpperCase() + reference.slice(1);
+      const longName = {paper: 'paper trading', live: 'live trading', backtest: 'backtest'};
+      fillSettingsFrom('settings-backtest', reference, variant, sel.backtest_settings);
+      fillSettingsFrom('settings-paper', actual, variant, sel.paper_settings);
+      document.getElementById('pvb-reference-label').textContent = Reference + ' settings';
+      document.getElementById('pvb-actual-label').textContent = Actual + ' settings';
+      document.getElementById('include-late-text').textContent =
+        `Include days ${actual} started late or restarted (after 09:20)`;
+      document.getElementById('cmp-title').textContent = `${variant}: ${reference} vs ${actual}`;
       const c = j.comparison;
       const items = [
-        {name: 'Backtest', color: css('--series-v28'), result: c && c.backtest, settings: sel.backtest_settings},
-        {name: 'Paper', color: css('--series-v30'), result: c && c.paper, settings: sel.paper_settings},
+        {name: Reference, color: css('--series-v28'), result: c && c.backtest, settings: sel.backtest_settings},
+        {name: Actual, color: css('--series-v30'), result: c && c.paper, settings: sel.paper_settings},
       ];
       let basis = '';
       if(c && c.common_days){
         const extra = [];
-        if(c.only_paper.length) extra.push(`paper only: ${c.only_paper.join(', ')}`);
-        if(c.only_backtest.length) extra.push(`backtest only: ${c.only_backtest.join(', ')}`);
+        if(c.only_paper.length) extra.push(`${actual} only: ${c.only_paper.join(', ')}`);
+        if(c.only_backtest.length) extra.push(`${reference} only: ${c.only_backtest.join(', ')}`);
         if(c.late_start.length && !c.include_late)
-          extra.push(`paper started late or restarted: ${c.late_start.map(x => `${x.date} (sessions ${x.start})`).join(', ')}`);
-        basis = `${variant} on the ${c.common_days} day(s) with both paper and backtest results` +
+          extra.push(`${actual} started late or restarted: ${c.late_start.map(x => `${x.date} (sessions ${x.start})`).join(', ')}`);
+        basis = `${variant} on the ${c.common_days} day(s) with both ${actual} and ${reference} results` +
           (extra.length ? ` (left out — ${extra.join('; ')})` : '') + '. ' +
-          (c.basis === 'net' ? 'Both net of charges; backtest also includes its slippage.'
-                             : 'Both before charges (backtest P&L includes its slippage).');
+          (c.basis === 'net' ? 'Both net of charges.' : 'Both before charges.') +
+          (reference === 'backtest' ? ' Backtest P&L includes its slippage.' : '') +
+          (actual === 'live' ? ' Live P&L is from actual broker fills.' : '');
       }
       renderCompare(items, {
         missing: '', basis,
-        empty: !sel.paper_settings ? `No paper trading results for ${variant} yet.`
-          : !sel.backtest_settings ? `No backtest results for ${variant} yet.`
+        empty: !sel.paper_settings ? `No ${longName[actual]} results for ${variant} yet.`
+          : !sel.backtest_settings ? `No ${longName[reference]} results for ${variant} yet.`
           : (c && c.late_start.length && !c.include_late)
-            ? 'The only common days are days paper started late or restarted. Tick the box above to include them.'
-          : 'Paper and backtest have no days in common for this selection. Run the backtest for the paper days.',
+            ? `The only common days are days ${actual} started late or restarted. Tick the box above to include them.`
+          : `${Actual} and ${reference} have no days in common for this selection.` +
+            (reference === 'backtest' ? ` Run the backtest for the ${actual} days.` : ''),
       });
       box.classList.remove('loading');
     }
@@ -1192,6 +1210,12 @@
     document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
     document.querySelectorAll('.cmp-settings').forEach(s => s.addEventListener('change', () => load()));
     document.getElementById('include-late').addEventListener('change', () => load());
+    try { const p = localStorage.getItem('perfPair'); if(p) document.getElementById('pvb-pair').value = p; } catch(e) {}
+    if(!document.getElementById('pvb-pair').value) document.getElementById('pvb-pair').value = 'paper-backtest';
+    document.getElementById('pvb-pair').addEventListener('change', e => {
+      try { localStorage.setItem('perfPair', e.target.value); } catch(error) {}
+      load(false);   // the settings lists belong to other sources now
+    });
 
     // CSV download of the current selection (single view): one row per day, or one row per trade.
     function downloadCsv(name, header, rows){
