@@ -241,6 +241,16 @@
       .today-warn { color: #92400e; font-weight: 600; }
       .today-muted { color: #475569; }
       .today-fold > summary { cursor: pointer; }
+      .nifty-chart-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem; font-size: 0.9rem; }
+      .nifty-chart-controls button { margin: 0; padding: 0.2rem 0.6rem; font-size: 0.85rem; }
+      .nifty-chart-controls button.active { background: #0f766e; color: #fff; border-color: #0f766e; }
+      .nifty-chart-controls input[type=date] { font: inherit; padding: 0.15rem 0.3rem; }
+      .nifty-chart-controls label { display: inline-flex; align-items: center; gap: 0.25rem; }
+      .nifty-chart { position: relative; width: 100%; min-height: 120px; }
+      .nifty-chart svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+      .nifty-chart-tip { position: absolute; pointer-events: none; background: #0f172a; color: #f8fafc; border-radius: 6px;
+        padding: 0.35rem 0.5rem; font-size: 0.8rem; line-height: 1.35; white-space: pre; display: none; z-index: 2; max-width: 92%; }
+      .nifty-chart-key { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 2px; vertical-align: -1px; }
       .today-run { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-top: 0.45rem; }
       .today-run input[type=date], .today-run select { font: inherit; padding: 0.2rem 0.3rem; }
       .today-run button { margin: 0; padding: 0.25rem 0.6rem; font-size: 0.85rem; }
@@ -417,6 +427,29 @@
       <div class="section-body">
         <div id="today-grid" class="today-grid"><div class="today-muted">Loading...</div></div>
         <div id="today-updated" class="today-muted" style="font-size:0.82rem;margin-top:0.4rem"></div>
+      </div>
+    </details>
+
+    <details id="nifty-chart-section" class="section" open>
+      <summary>NIFTY chart</summary>
+      <div class="section-body">
+        <div class="nifty-chart-controls">
+          <span>
+            <button type="button" data-nifty-interval="1">1 min</button>
+            <button type="button" data-nifty-interval="5" class="active">5 min</button>
+            <button type="button" data-nifty-interval="15">15 min</button>
+          </span>
+          <label>Date <input type="date" id="nifty-chart-date" /></label>
+          <button type="button" id="nifty-chart-today">Today</button>
+          <label><input type="checkbox" id="nifty-chart-v28" checked /> <span class="nifty-chart-key" style="background:#2563eb"></span> v28</label>
+          <label><input type="checkbox" id="nifty-chart-v30" checked /> <span class="nifty-chart-key" style="background:#d97706"></span> v30</label>
+          <span id="nifty-chart-info" class="today-muted"></span>
+        </div>
+        <div id="nifty-chart" class="nifty-chart"><div class="today-muted">Loading...</div></div>
+        <div class="today-muted" style="font-size:0.82rem;margin-top:0.3rem">
+          ▲ below a candle = CE bought, ▼ above a candle = PE bought, ● = exit (green profit, red loss), ○ = still open.
+          A marker with a thick outline is a LIVE_ORDER trade; the others are paper trades.
+        </div>
       </div>
     </details>
 
@@ -1507,6 +1540,212 @@
 
         grid.replaceChildren(...cards);
         updated.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' (refreshes every 15 seconds)';
+      }
+
+      // ---- NIFTY chart: the day's NIFTY 50 candles with the paper/live trades marked ----
+      const niftyChart = {interval: 5, date: '', data: null, loading: false};
+      const NIFTY_VARIANT_COLORS = {v28: '#2563eb', v30: '#d97706'};
+      const NIFTY_SVG = 'http://www.w3.org/2000/svg';
+
+      function niftySvg(tag, attrs, text){
+        const node = document.createElementNS(NIFTY_SVG, tag);
+        Object.entries(attrs || {}).forEach(([k, v]) => node.setAttribute(k, v));
+        if(text !== undefined) node.textContent = text;
+        return node;
+      }
+
+      function niftyMinutes(hhmm){
+        const parts = String(hhmm || '').split(':');
+        return Number(parts[0]) * 60 + Number(parts[1]);
+      }
+
+      // 1-minute candles [["HH:MM", o, h, l, c]] -> candles of `interval` minutes, buckets counted from 09:15.
+      function niftyAggregate(candles, interval){
+        const out = [];
+        let current = null;
+        (candles || []).forEach(c => {
+          const slot = Math.floor((niftyMinutes(c[0]) - 555) / interval);
+          if(!current || current.slot !== slot){
+            const start = 555 + slot * interval;
+            current = {slot, t: String(Math.floor(start / 60)).padStart(2, '0') + ':' + String(start % 60).padStart(2, '0'),
+                       o: c[1], h: c[2], l: c[3], c: c[4]};
+            out.push(current);
+          } else {
+            current.h = Math.max(current.h, c[2]); current.l = Math.min(current.l, c[3]); current.c = c[4];
+          }
+        });
+        return out;
+      }
+
+      function niftyNiceStep(range, target){
+        const raw = range / Math.max(1, target);
+        const power = Math.pow(10, Math.floor(Math.log10(raw)));
+        const scaled = raw / power;
+        return (scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 2.5 ? 2.5 : scaled <= 5 ? 5 : 10) * power;
+      }
+
+      function renderNiftyChart(){
+        const box = document.getElementById('nifty-chart');
+        const info = document.getElementById('nifty-chart-info');
+        const data = niftyChart.data;
+        if(!box || !data) return;
+        const candles = niftyAggregate(data.candles, niftyChart.interval);
+        if(!candles.length){
+          box.replaceChildren(Object.assign(document.createElement('div'), {className: 'today-muted',
+            textContent: 'No NIFTY candles for ' + data.date + ' (market closed, or before the 09:15 open).'}));
+          info.textContent = '';
+          return;
+        }
+        const W = Math.max(320, box.clientWidth || 900), H = Math.max(260, Math.min(440, Math.round(W * 0.42)));
+        const M = {left: 6, right: 58, top: 22, bottom: 22};
+        const slots = Math.ceil(375 / niftyChart.interval);          // the whole session, so the day fills in left to right
+        const band = (W - M.left - M.right) / slots;
+        const xAt = slot => M.left + band * slot + band / 2;
+        let lo = Math.min(...candles.map(c => c.l)), hi = Math.max(...candles.map(c => c.h));
+        const pad = Math.max(5, (hi - lo) * 0.08);
+        lo -= pad; hi += pad;
+        const yAt = price => M.top + (H - M.top - M.bottom) * (hi - price) / (hi - lo);
+        const svg = niftySvg('svg', {viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'NIFTY 50 candles for ' + data.date});
+
+        const step = niftyNiceStep(hi - lo, 6);
+        for(let p = Math.ceil(lo / step) * step; p <= hi; p += step){
+          svg.appendChild(niftySvg('line', {x1: M.left, x2: W - M.right, y1: yAt(p), y2: yAt(p), stroke: '#e2e8f0', 'stroke-width': 1}));
+          svg.appendChild(niftySvg('text', {x: W - M.right + 4, y: yAt(p) + 4, 'font-size': 11, fill: '#64748b'}, p.toFixed(0)));
+        }
+        for(let minute = 600; minute <= 930; minute += 60){
+          const x = xAt((minute - 555) / niftyChart.interval) - band / 2;
+          svg.appendChild(niftySvg('line', {x1: x, x2: x, y1: M.top, y2: H - M.bottom, stroke: '#f1f5f9', 'stroke-width': 1}));
+          svg.appendChild(niftySvg('text', {x, y: H - 6, 'font-size': 11, fill: '#64748b', 'text-anchor': 'middle'},
+            String(minute / 60).padStart(2, '0') + ':00'));
+        }
+
+        const bodyWidth = Math.max(1, Math.min(14, band * 0.7));
+        const bySlot = new Map();
+        candles.forEach(c => {
+          bySlot.set(c.slot, c);
+          const up = c.c >= c.o, color = up ? '#16a34a' : '#dc2626', x = xAt(c.slot);
+          svg.appendChild(niftySvg('line', {x1: x, x2: x, y1: yAt(c.h), y2: yAt(c.l), stroke: color, 'stroke-width': 1}));
+          const top = yAt(Math.max(c.o, c.c)), height = Math.max(1, Math.abs(yAt(c.o) - yAt(c.c)));
+          svg.appendChild(niftySvg('rect', {x: x - bodyWidth / 2, y: top, width: bodyWidth, height, fill: color}));
+        });
+        const last = candles[candles.length - 1];
+        svg.appendChild(niftySvg('line', {x1: M.left, x2: W - M.right, y1: yAt(last.c), y2: yAt(last.c), stroke: '#0f172a',
+          'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0.45}));
+        svg.appendChild(niftySvg('rect', {x: W - M.right + 1, y: yAt(last.c) - 8, width: M.right - 2, height: 16, fill: '#0f172a', rx: 3}));
+        svg.appendChild(niftySvg('text', {x: W - M.right + 4, y: yAt(last.c) + 4, 'font-size': 11, fill: '#fff', 'font-weight': 700}, last.c.toFixed(2)));
+
+        // Trades: entry triangle on the entry candle, exit dot on the exit candle, joined by a dashed line.
+        const slotOf = hhmm => Math.floor((niftyMinutes(hhmm) - 555) / niftyChart.interval);
+        const candleAt = slot => {              // the candle of that slot, else the nearest earlier one
+          for(let s = slot; s >= 0; s--) if(bySlot.has(s)) return bySlot.get(s);
+          return candles[0];
+        };
+        const stacked = {};
+        const tradesBySlot = new Map();
+        const note = (slot, text) => { if(!tradesBySlot.has(slot)) tradesBySlot.set(slot, []); tradesBySlot.get(slot).push(text); };
+        const rupees = n => (n >= 0 ? '+' : '−') + Math.abs(Math.round(n)).toLocaleString('en-IN');
+        (data.trades || []).forEach(t => {
+          const box28 = document.getElementById('nifty-chart-' + t.variant);
+          if(box28 && !box28.checked) return;
+          if(!t.entry_time) return;
+          const color = NIFTY_VARIANT_COLORS[t.variant] || '#475569';
+          const live = t.source === 'live';
+          const eSlot = slotOf(t.entry_time), eCandle = candleAt(eSlot), ex = xAt(eCandle.slot);
+          const isCall = String(t.side).toUpperCase() === 'CE';
+          const key = eCandle.slot + (isCall ? 'c' : 'p');
+          const level = stacked[key] = (stacked[key] || 0) + 1;
+          const offset = 6 + (level - 1) * 13;
+          const ey = isCall ? yAt(eCandle.l) + offset : yAt(eCandle.h) - offset;
+          const tri = isCall ? `${ex},${ey} ${ex - 6},${ey + 10} ${ex + 6},${ey + 10}` : `${ex},${ey} ${ex - 6},${ey - 10} ${ex + 6},${ey - 10}`;
+          const who = t.variant + (live ? ' LIVE' : ' paper');
+          note(eCandle.slot, `${who}: bought ${t.side} at ${t.entry_time}` + (t.entry ? ` @ ${Number(t.entry).toFixed(2)}` : ''));
+          const open = !t.exit_time;
+          const xSlot = open ? last.slot : candleAt(slotOf(t.exit_time)).slot;
+          const xCandle = candleAt(xSlot), xx = xAt(xCandle.slot), xy = yAt(xCandle.c);
+          const win = Number(t.pnl_rs) > 0;
+          svg.appendChild(niftySvg('line', {x1: ex, y1: yAt(eCandle.c), x2: xx, y2: xy, stroke: color, 'stroke-width': 1.5,
+            'stroke-dasharray': '4 3', opacity: 0.8}));
+          svg.appendChild(niftySvg('polygon', {points: tri, fill: color, stroke: live ? '#0f172a' : '#fff', 'stroke-width': live ? 2 : 1}));
+          svg.appendChild(niftySvg('circle', {cx: xx, cy: xy, r: 5, fill: open ? '#fff' : (win ? '#16a34a' : '#dc2626'),
+            stroke: live ? '#0f172a' : color, 'stroke-width': live ? 2.5 : 2}));
+          note(xCandle.slot, open
+            ? `${who}: ${t.side} still open` + (t.pnl_rs === null || t.pnl_rs === undefined ? '' : ` (${rupees(t.pnl_rs)} now)`)
+            : `${who}: sold ${t.side} at ${t.exit_time}` + (t.exit ? ` @ ${Number(t.exit).toFixed(2)}` : '') + ` ${rupees(t.pnl_rs)} (${t.reason})`);
+        });
+
+        // Hover: crosshair and a box with the candle's prices and the trades on it.
+        const cross = niftySvg('line', {y1: M.top, y2: H - M.bottom, stroke: '#94a3b8', 'stroke-width': 1, visibility: 'hidden'});
+        const hit = niftySvg('rect', {x: M.left, y: 0, width: W - M.left - M.right, height: H, fill: 'transparent'});
+        svg.append(cross, hit);
+        const tip = Object.assign(document.createElement('div'), {className: 'nifty-chart-tip'});
+        const showAt = clientX => {
+          const rect = svg.getBoundingClientRect();
+          const x = (clientX - rect.left) * W / rect.width;
+          const slot = Math.max(0, Math.min(slots - 1, Math.floor((x - M.left) / band)));
+          const c = bySlot.get(slot);
+          if(!c){ cross.setAttribute('visibility', 'hidden'); tip.style.display = 'none'; return; }
+          cross.setAttribute('x1', xAt(slot)); cross.setAttribute('x2', xAt(slot)); cross.setAttribute('visibility', 'visible');
+          const change = c.c - c.o;
+          tip.textContent = [`${c.t}   O ${c.o.toFixed(2)}  H ${c.h.toFixed(2)}  L ${c.l.toFixed(2)}  C ${c.c.toFixed(2)}  (${change >= 0 ? '+' : '−'}${Math.abs(change).toFixed(2)})`]
+            .concat(tradesBySlot.get(slot) || []).join('\n');
+          tip.style.display = 'block';
+          const px = xAt(slot) * rect.width / W;
+          tip.style.top = '4px';
+          tip.style.left = px > rect.width / 2 ? '' : (px + 12) + 'px';
+          tip.style.right = px > rect.width / 2 ? (rect.width - px + 12) + 'px' : '';
+        };
+        hit.addEventListener('pointermove', e => showAt(e.clientX));
+        hit.addEventListener('pointerdown', e => showAt(e.clientX));
+        hit.addEventListener('pointerleave', () => { cross.setAttribute('visibility', 'hidden'); tip.style.display = 'none'; });
+
+        box.replaceChildren(svg, tip);
+        const shown = (data.trades || []).length;
+        let dateLabel = data.date;
+        try { dateLabel = new Date(data.date + 'T00:00').toLocaleDateString(undefined, {weekday: 'short', day: 'numeric', month: 'short'}); } catch(e) {}
+        info.textContent = dateLabel + ' · NIFTY ' + last.c.toFixed(2) + ' · ' + shown + ' trade' + (shown === 1 ? '' : 's') +
+          ' · updated ' + data.updated_at + (data.is_today ? ' (refreshes every 30 seconds)' : '');
+      }
+
+      async function loadNiftyChart(){
+        const section = document.getElementById('nifty-chart-section');
+        if(!section || !section.open || document.hidden || niftyChart.loading) return;
+        niftyChart.loading = true;
+        try {
+          const r = await fetch('/api/market/nifty-chart' + (niftyChart.date ? '?date=' + encodeURIComponent(niftyChart.date) : ''));
+          const j = await r.json().catch(() => ({}));
+          if(!r.ok || !j.ok) throw new Error(j.msg || ('HTTP ' + r.status));
+          niftyChart.data = j;
+          const dateInput = document.getElementById('nifty-chart-date');
+          if(document.activeElement !== dateInput) dateInput.value = j.date;
+          renderNiftyChart();
+        } catch(error) {
+          document.getElementById('nifty-chart-info').textContent = 'NIFTY chart: ' + error.message;
+          if(!niftyChart.data) document.getElementById('nifty-chart').replaceChildren(
+            Object.assign(document.createElement('div'), {className: 'today-muted', textContent: 'Chart not available: ' + error.message}));
+        } finally {
+          niftyChart.loading = false;
+        }
+      }
+
+      function initNiftyChart(){
+        try { const saved = Number(localStorage.getItem('niftyChartInterval')); if([1, 5, 15].includes(saved)) niftyChart.interval = saved; } catch(e) {}
+        const buttons = document.querySelectorAll('[data-nifty-interval]');
+        const mark = () => buttons.forEach(b => b.classList.toggle('active', Number(b.dataset.niftyInterval) === niftyChart.interval));
+        buttons.forEach(b => b.addEventListener('click', () => {
+          niftyChart.interval = Number(b.dataset.niftyInterval);
+          try { localStorage.setItem('niftyChartInterval', String(niftyChart.interval)); } catch(e) {}
+          mark(); renderNiftyChart();
+        }));
+        mark();
+        document.getElementById('nifty-chart-date').addEventListener('change', e => { niftyChart.date = e.target.value; loadNiftyChart(); });
+        document.getElementById('nifty-chart-today').addEventListener('click', () => { niftyChart.date = ''; loadNiftyChart(); });
+        ['v28', 'v30'].forEach(v => document.getElementById('nifty-chart-' + v).addEventListener('change', renderNiftyChart));
+        document.getElementById('nifty-chart-section').addEventListener('toggle', loadNiftyChart);
+        let resizeTimer = null;
+        window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderNiftyChart, 150); });
+        loadNiftyChart();
+        // Only the live day changes; an older date is loaded once.
+        setInterval(() => { if(!niftyChart.date || (niftyChart.data && niftyChart.data.is_today)) loadNiftyChart(); }, 30000);
       }
 
       const DAILY_DOWNLOAD_BADGES = {
@@ -2993,6 +3232,7 @@
       setInterval(refreshAuto, 3000);
       loadTodayPanel();
       setInterval(loadTodayPanel, 15000);
+      initNiftyChart();
       updateServerTime();
       setInterval(updateServerTime, 1000);
     </script>

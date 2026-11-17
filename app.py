@@ -1850,8 +1850,8 @@ def log_run_mode(text: str) -> str:
     return m.group(1).strip().upper() if m else ""
 
 
-def today_paper_trades(log_dir: str, variant: str, today: str) -> list:
-    """Today's closed paper trades for one variant from the papertrade Excel files (all sessions, any settings)."""
+def today_paper_trades(log_dir: str, variant: str, today: str, source: str = "paper") -> list:
+    """Today's closed paper (or live) trades for one variant from the result Excel files (all sessions, any settings)."""
     trades, seen = [], set()
     try:
         names = sorted(os.listdir(log_dir))
@@ -1859,9 +1859,9 @@ def today_paper_trades(log_dir: str, variant: str, today: str) -> list:
         return []
     for name in names:
         info = classify_result_file(name)
-        if not info or info["source"] != "paper" or info["variant"] != variant or info["date"] != today:
+        if not info or info["source"] != source or info["variant"] != variant or info["date"] != today:
             continue
-        for t in _read_result_file(os.path.join(log_dir, name), "paper")["trades"]:
+        for t in _read_result_file(os.path.join(log_dir, name), source)["trades"]:
             ident = (t["side"], t["symbol"], t["entry_time"])
             if ident in seen:
                 continue
@@ -2121,6 +2121,116 @@ def api_parity_run():
 @app.route("/api/parity/status")
 def api_parity_status():
     return jsonify({"ok": True, **parity_run_status()})
+
+
+# ---------------------------------------------------------------------------
+# NIFTY chart on the dashboard: 1-minute NIFTY 50 candles of one day from Kite,
+# with that day's paper and live trades to mark on it.
+# ---------------------------------------------------------------------------
+NIFTY_CHART_TOKEN = 256265
+NIFTY_CHART_LOOKBACK_DAYS = 7          # no candles today (weekend, holiday, before the open): show the last day that has them
+NIFTY_CHART_CACHE_SECONDS = 20         # several open tabs share one Kite call
+_NIFTY_CHART_CACHE: dict = {}
+
+
+def nifty_chart_candles(rows: list) -> list:
+    """Kite 1-minute rows -> [["HH:MM", open, high, low, close], ...] in time order."""
+    out = []
+    for r in rows or []:
+        stamp = r.get("date")
+        hhmm = stamp.strftime("%H:%M") if hasattr(stamp, "strftime") else str(stamp or "")[11:16]
+        try:
+            values = [round(float(r[k]), 2) for k in ("open", "high", "low", "close")]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if len(hhmm) == 5 and values[0] > 0:
+            out.append([hhmm, *values])
+    out.sort(key=lambda c: c[0])
+    return out
+
+
+def nifty_chart_trades(log_dir: str, day: str, today: str = "") -> list:
+    """Paper and live trades of `day` for the chart: closed trades from the result files, plus
+    the position still open (from the running session's log) when `day` is today."""
+    def hhmm(value):
+        text = str(value or "")
+        return text[11:16] if len(text) >= 16 else text[:5]
+
+    trades = []
+    for variant in TODAY_STRATEGIES:
+        for source, process_name in (("paper", variant), ("live", f"live_{variant}")):
+            closed = today_paper_trades(log_dir, variant, day, source)
+            for t in closed:
+                trades.append({"variant": variant, "source": source, "side": t["side"], "symbol": t["symbol"],
+                               "entry_time": hhmm(t.get("entry_time")), "exit_time": hhmm(t.get("exit_time")),
+                               "entry": t.get("entry_price", 0.0), "exit": t.get("exit_price", 0.0),
+                               "pnl_rs": round(t["pnl_rs"], 2), "reason": t["exit_reason"]})
+            if day != today:
+                continue
+            try:
+                log_path = get_active_log_path(process_name)
+                if not os.path.exists(log_path) or datetime.fromtimestamp(os.path.getmtime(log_path), IST).date().isoformat() != today:
+                    continue
+                tail = _read_tail(log_path)
+                wanted = "LIVE_ORDER" if source == "live" else "PAPERTRADE_LIVE"
+                position = parse_strategy_log_today(tail, today)["open_position"] if log_run_mode(tail) == wanted else None
+            except Exception:
+                position = None
+            if position and not any(t["symbol"] == position["symbol"] and hhmm(t.get("entry_time")) == position["time"] for t in closed):
+                trades.append({"variant": variant, "source": source, "side": position["side"], "symbol": position["symbol"],
+                               "entry_time": position["time"], "exit_time": "", "entry": position.get("entry", 0.0),
+                               "exit": None, "pnl_rs": position.get("unrealized_rs"), "reason": "OPEN"})
+    trades.sort(key=lambda t: (t["entry_time"], t["variant"], t["source"]))
+    return trades
+
+
+def _nifty_day_rows(kite, day):
+    start = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=15)
+    end = datetime.combine(day, datetime.min.time()).replace(hour=15, minute=30)
+    return kite.historical_data(NIFTY_CHART_TOKEN, start, end, "minute", continuous=False, oi=False) or []
+
+
+@app.route("/api/market/nifty-chart")
+def api_market_nifty_chart():
+    """NIFTY 50 1-minute candles for ?date=YYYY-MM-DD (default: today, else the last day with candles) + its trades."""
+    today_date = datetime.now(IST).date()
+    today = today_date.isoformat()
+    asked = _date_arg("date")
+    cache_key = asked or "latest"
+    cached = _NIFTY_CHART_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < NIFTY_CHART_CACHE_SECONDS:
+        return jsonify(cached[1])
+
+    kite, kite_err = _build_kite_client_from_env()
+    if kite is None:
+        return jsonify({"ok": False, "msg": f"NIFTY chart unavailable: {kite_err}"}), 400
+    try:
+        if asked:
+            day = datetime.fromisoformat(asked).date()
+            candles = nifty_chart_candles(_nifty_day_rows(kite, day)) if day <= today_date else []
+        else:
+            day, candles = today_date, []
+            for back in range(NIFTY_CHART_LOOKBACK_DAYS + 1):
+                candidate = today_date - timedelta(days=back)
+                if candidate.weekday() >= 5:
+                    continue
+                candles = nifty_chart_candles(_nifty_day_rows(kite, candidate))
+                if candles:
+                    day = candidate
+                    break
+    except Exception as exc:
+        return jsonify({"ok": False, "msg": f"NIFTY chart fetch failed: {exc}"}), 502
+
+    day_text = day.isoformat()
+    try:
+        trades = nifty_chart_trades(LOGS_DIR, day_text, today)
+    except Exception:
+        trades = []
+    payload = {"ok": True, "date": day_text, "is_today": day_text == today, "candles": candles, "trades": trades,
+               "updated_at": datetime.now(IST).strftime("%H:%M:%S")}
+    _NIFTY_CHART_CACHE.clear()          # one entry is enough; old dates must not pile up
+    _NIFTY_CHART_CACHE[cache_key] = (time.time(), payload)
+    return jsonify(payload)
 
 
 @app.route("/api/today")

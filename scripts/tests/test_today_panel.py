@@ -140,6 +140,90 @@ class RunModeAndPaperExcelTests(unittest.TestCase):
         self.assertEqual(bt["settings"], "mtf5min_mfe_max2_sl25 (csv)")
 
 
+class NiftyChartTests(unittest.TestCase):
+    def test_candles(self):
+        from datetime import datetime
+
+        rows = [{"date": datetime(2026, 11, 16, 9, 16), "open": 25250.5, "high": 25260.0, "low": 25245.25, "close": 25255.0},
+                {"date": datetime(2026, 11, 16, 9, 15), "open": 25240.0, "high": 25252.0, "low": 25238.0, "close": 25250.5},
+                {"date": "2026-11-16 09:17:00+05:30", "open": 25255, "high": 25258, "low": 25250, "close": 25251},
+                {"date": datetime(2026, 11, 16, 9, 18), "open": None, "high": 1, "low": 1, "close": 1},      # broken row dropped
+                {"date": datetime(2026, 11, 16, 9, 19), "open": 0, "high": 0, "low": 0, "close": 0}]         # empty row dropped
+        self.assertEqual(webapp.nifty_chart_candles(rows), [
+            ["09:15", 25240.0, 25252.0, 25238.0, 25250.5], ["09:16", 25250.5, 25260.0, 25245.25, 25255.0],
+            ["09:17", 25255.0, 25258.0, 25250.0, 25251.0]])
+        self.assertEqual(webapp.nifty_chart_candles(None), [])
+
+    def test_trades_and_route(self):
+        import tempfile
+        from datetime import datetime, timedelta
+        from unittest import mock
+
+        import pandas as pd
+
+        with tempfile.TemporaryDirectory() as tmp:
+            def write(name, rows):
+                with pd.ExcelWriter(Path(tmp) / name) as xw:
+                    pd.DataFrame(rows).to_excel(xw, sheet_name="live_trade_events", index=False)
+            pe = {"entry_time": "2026-11-16 09:24:00", "exit_time": "2026-11-16 09:40:04", "side": "PE",
+                  "option_symbol": "NIFTY26N1725250PE", "entry_price": 105.4, "exit_price": 80.1,
+                  "exit_reason": "EMERGENCY_SL_HIT", "pnl_rs": -1644.5, "pnl_points": -25.3}
+            ce = dict(pe, entry_time="2026-11-16 09:44:00", exit_time="2026-11-16 09:59:36", side="CE",
+                      option_symbol="NIFTY26N1725300CE", exit_reason="TRAILING_STOP_HIT", pnl_rs=965.25)
+            write("papertrade_16112026_092500_mtf5min_mfe_max2_sl25_v30.xlsx", [pe, ce])
+            write("papertrade_16112026_092500_mtf5min_mfe_max2_sl25_v28.xlsx", [pe])
+            write("livetrade_16112026_090012_mtf5min_mfe_max2_sl25_v30.xlsx", [ce])
+            write("papertrade_13112026_090012_mtf5min_mfe_max2_sl25_v30.xlsx", [dict(pe, entry_time="2026-11-13 09:30:00")])
+            try:
+                trades = webapp.nifty_chart_trades(tmp, "2026-11-16")
+                self.assertEqual([(t["variant"], t["source"], t["side"], t["entry_time"], t["exit_time"], t["pnl_rs"]) for t in trades], [
+                    ("v28", "paper", "PE", "09:24", "09:40", -1644.5), ("v30", "paper", "PE", "09:24", "09:40", -1644.5),
+                    ("v30", "live", "CE", "09:44", "09:59", 965.25), ("v30", "paper", "CE", "09:44", "09:59", 965.25)])
+                self.assertEqual(webapp.nifty_chart_trades(tmp, "2026-11-14"), [])
+
+                asked = []
+
+                class FakeKite:
+                    def historical_data(self, token, start, end, interval, continuous=False, oi=False):
+                        asked.append((token, start.date().isoformat(), interval))
+                        if start.date().isoformat() != "2026-11-16":
+                            return []                                   # only the 16th has candles
+                        return [{"date": start, "open": 25240.0, "high": 25252.0, "low": 25238.0, "close": 25250.5}]
+
+                client = webapp.app.test_client()
+                self.assertEqual(client.get("/api/market/nifty-chart").status_code, 401)
+                with client.session_transaction() as s:
+                    s["logged_in"] = True
+                with mock.patch.object(webapp, "LOGS_DIR", tmp), \
+                        mock.patch.object(webapp, "_build_kite_client_from_env", return_value=(FakeKite(), "")):
+                    webapp._NIFTY_CHART_CACHE.clear()
+                    j = client.get("/api/market/nifty-chart?date=2026-11-16").get_json()
+                    self.assertEqual((j["ok"], j["date"], j["candles"], len(j["trades"])),
+                                     (True, "2026-11-16", [["09:15", 25240.0, 25252.0, 25238.0, 25250.5]], 4))
+                    self.assertEqual(asked, [(256265, "2026-11-16", "minute")])
+                    client.get("/api/market/nifty-chart?date=2026-11-16")
+                    self.assertEqual(len(asked), 1)                      # second call within 20 s: from the cache
+                    # a day without candles: empty chart, no error; a future date is not asked from Kite
+                    webapp._NIFTY_CHART_CACHE.clear()
+                    self.assertEqual(client.get("/api/market/nifty-chart?date=2026-11-15").get_json()["candles"], [])
+                    webapp._NIFTY_CHART_CACHE.clear()
+                    before = len(asked)
+                    future = (datetime.now(webapp.IST).date() + timedelta(days=3)).isoformat()
+                    self.assertEqual(client.get(f"/api/market/nifty-chart?date={future}").get_json()["candles"], [])
+                    self.assertEqual(len(asked), before)
+                    # no date: walks back over the days without candles and stops (weekends are skipped)
+                    webapp._NIFTY_CHART_CACHE.clear()
+                    j = client.get("/api/market/nifty-chart").get_json()
+                    self.assertTrue(j["ok"])
+                    self.assertLessEqual(len(asked) - before, webapp.NIFTY_CHART_LOOKBACK_DAYS + 1)
+                with mock.patch.object(webapp, "_build_kite_client_from_env", return_value=(None, "missing_access_token")):
+                    webapp._NIFTY_CHART_CACHE.clear()
+                    self.assertEqual(client.get("/api/market/nifty-chart").status_code, 400)
+            finally:
+                webapp._NIFTY_CHART_CACHE.clear()
+                webapp._PERF_CACHE.clear()
+
+
 class LiveAutostartSwitchTests(unittest.TestCase):
     def test_switch_is_off_by_default_and_needs_a_strategy(self):
         import tempfile
