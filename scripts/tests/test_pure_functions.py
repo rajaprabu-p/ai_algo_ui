@@ -632,6 +632,32 @@ class TrailOnCloseLiveTests(StrategyTestCase):
             self.assertEqual(m.paper_candle_check_stop(prev, "PE", ts, True), 0.0)
             self.assertEqual(m.paper_candle_check_stop(None, "CE", ts, True), 0.0)
 
+    def test_close_arm_survives_repeated_rebuilds(self):
+        # 18 Nov v30 paper: PE entry 169.60, emergency stop 145.60; the 09:39 close 199.60
+        # armed +30 -> stop 189.60. The rebuild runs on every tick batch and builds a fresh
+        # position each time; the second rebuild of 09:39 lost the arm record and tested
+        # the 09:39 low (185.10) against 189.60 -> exit at the open 185.20 (backtest 09:47).
+        for m in self.each_module():
+            ts = m.pd.Timestamp("2026-11-18 09:39:00", tz=m.IST)
+            # rebuild 1 (no tick since the close): the rebuild itself raises 145.60 -> 189.60
+            prev0 = {"side": "PE", "trailing_stop_price": 145.6}
+            self.assertEqual(m.paper_candle_check_stop(prev0, "PE", ts, True), 145.6)
+            rebuilt1 = {"side": "PE", "trailing_stop_price": 189.6,
+                        **m.rebuild_close_arm(prev0, {}, ts, 145.6, 189.6)}
+            self.assertEqual(rebuilt1["stop_before_close_arm"], 145.6)
+            # rebuild 2 of the same candle: previous stop is already 189.60 (no raise now)
+            self.assertEqual(m.paper_candle_check_stop(rebuilt1, "PE", ts, True), 145.6)
+            rebuilt2 = {"side": "PE", "trailing_stop_price": 189.6,
+                        **m.rebuild_close_arm(rebuilt1, {}, ts, 189.6, 189.6)}
+            self.assertEqual(m.paper_candle_check_stop(rebuilt2, "PE", ts, True), 145.6)
+            # record kept from the persisted copy when the previous position lacks it
+            tick_armed = {"close_arm_candle": "2026-11-18 09:39", "stop_before_close_arm": 145.6}
+            self.assertEqual(m.rebuild_close_arm({"side": "PE"}, tick_armed, ts, 189.6, 189.6), tick_armed)
+            # the next candle is tested against the raised stop
+            nxt = ts + m.pd.Timedelta(minutes=1)
+            self.assertEqual(m.rebuild_close_arm(rebuilt2, {}, nxt, 189.6, 189.6), {})
+            self.assertEqual(m.paper_candle_check_stop(rebuilt2, "PE", nxt, True), 189.6)
+
 
 class PapertradeNiftySummaryTests(StrategyTestCase):
     """Paper/live Excel summary: NIFTY prev close, open, high/low (+ times), close, change."""

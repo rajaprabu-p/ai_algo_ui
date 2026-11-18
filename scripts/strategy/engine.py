@@ -2245,6 +2245,25 @@ def close_arm_updates(position: dict, persisted: dict, candle_ts, stop_before: f
     return {"close_arm_candle": key, "stop_before_close_arm": round(safe_float(stop_before, 0.0), 2)}
 
 
+def rebuild_close_arm(previous_open: dict, persisted: dict, candle_ts, stop_before: float, stop_after: float) -> dict:
+    """close_arm_updates for the paper candle rebuild (TRAIL_ON_CLOSE).
+
+    The rebuild runs on every tick batch and replaces the open position with a fresh
+    dict, so the close-arm record must be carried into it; otherwise the next rebuild
+    of the same candle tests its low against the stop its own close raised (18 Nov:
+    exit 09:39 at the open 185.20, backtest 09:47). Keeps an existing record for this
+    candle; records a new one when this rebuild raised the stop.
+    """
+    key = candle_minute_key(candle_ts)
+    if not key:
+        return {}
+    for source in (previous_open or {}, persisted or {}):
+        before = safe_float(source.get("stop_before_close_arm"), 0.0)
+        if source.get("close_arm_candle") == key and before > 0:
+            return {"close_arm_candle": key, "stop_before_close_arm": before}
+    return close_arm_updates({}, {}, candle_ts, stop_before, stop_after)
+
+
 def paper_candle_check_stop(previous_open, side: str, candle_ts, trail_on_close: bool) -> float:
     """Stop the end-of-candle paper check tests the newest candle's low against.
 
@@ -4961,6 +4980,18 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                             previous_trailing_stop,
                             current_trailing_stop,
                         )
+                        if TRAIL_ON_CLOSE:
+                            # Carry the close-arm record into the fresh rebuilt position
+                            # (or record one when this rebuild raised the stop from the
+                            # newest close), so later rebuilds of the same candle still
+                            # test it against the stop in place before that close.
+                            paper_open.update(rebuild_close_arm(
+                                previous_paper_open,
+                                live_state.get("paper_open_position") or {},
+                                day.iloc[-1].get("ce_ts" if current_side == "CE" else "pe_ts") or day.iloc[-1].get("spot_ts"),
+                                previous_trailing_stop,
+                                paper_open["trailing_stop_price"],
+                            ))
                         paper_open["trailing_stop_active"] = bool(
                             previous_paper_open.get("trailing_stop_active")
                             or paper_open.get("trailing_stop_active")
