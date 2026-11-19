@@ -613,50 +613,78 @@ class TrailOnCloseLiveTests(StrategyTestCase):
         self.assertGreater(on_high, 173.70)   # the high arms +25 -> lock
         self.assertEqual(on_close, 173.70)    # the close does not
 
-    def test_close_armed_stop_skips_its_own_candle(self):
+    def test_raised_stop_skips_its_own_candle(self):
         # 13 Nov v30 paper: the 09:56 close armed +25 -> stop 200 (entry 185); the 09:56
         # candle's low (~199) must be tested against the stop before that raise (170).
         for m in self.each_module():
             ts = m.pd.Timestamp("2026-11-13 09:56", tz=m.IST)
-            arm = m.close_arm_updates({}, {}, ts, 170.0, 200.0)
-            self.assertEqual(arm, {"close_arm_candle": "2026-11-13 09:56", "stop_before_close_arm": 170.0})
-            # a later tick after the same close keeps the first 'before' value
-            self.assertEqual(m.close_arm_updates(arm, {}, ts, 200.0, 205.0)["stop_before_close_arm"], 170.0)
-            self.assertEqual(m.close_arm_updates({}, {}, ts, 200.0, 200.0), {})   # no raise
-            prev = {"side": "CE", "trailing_stop_price": 200.0, **arm}
-            self.assertEqual(m.paper_candle_check_stop(prev, "CE", ts, True), 170.0)
-            self.assertEqual(m.paper_candle_check_stop(prev, "CE", "2026-11-13 09:56:00+05:30", True), 170.0)
-            # next candle, trailing on highs, or another side -> the raised stop / nothing
-            self.assertEqual(m.paper_candle_check_stop(prev, "CE", ts + m.pd.Timedelta(minutes=1), True), 200.0)
-            self.assertEqual(m.paper_candle_check_stop(prev, "CE", ts, False), 200.0)
-            self.assertEqual(m.paper_candle_check_stop(prev, "PE", ts, True), 0.0)
-            self.assertEqual(m.paper_candle_check_stop(None, "CE", ts, True), 0.0)
+            rec = m.candle_raise_updates({}, {}, ts, 170.0, 200.0)
+            self.assertEqual(rec, {"stop_before_candle": {"2026-11-13 09:56": 170.0}})
+            # a later raise attributed to the same candle keeps the first 'before' value
+            self.assertEqual(m.candle_raise_updates(rec, {}, ts, 200.0, 205.0), rec)
+            self.assertEqual(m.candle_raise_updates({}, {}, ts, 200.0, 200.0), {})   # no raise
+            prev = {"side": "CE", "trailing_stop_price": 200.0, **rec}
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", ts), 170.0)
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", "2026-11-13 09:56:00+05:30"), 170.0)
+            # next candle or another side -> the raised stop / nothing
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", ts + m.pd.Timedelta(minutes=1)), 200.0)
+            self.assertEqual(m.paper_candle_check_stop(prev, "PE", ts), 0.0)
+            self.assertEqual(m.paper_candle_check_stop(None, "CE", ts), 0.0)
 
-    def test_close_arm_survives_repeated_rebuilds(self):
+    def test_close_raise_survives_repeated_rebuilds(self):
         # 18 Nov v30 paper: PE entry 169.60, emergency stop 145.60; the 09:39 close 199.60
         # armed +30 -> stop 189.60. The rebuild runs on every tick batch and builds a fresh
-        # position each time; the second rebuild of 09:39 lost the arm record and tested
-        # the 09:39 low (185.10) against 189.60 -> exit at the open 185.20 (backtest 09:47).
+        # position each time; the second rebuild of 09:39 lost the record and tested the
+        # 09:39 low (185.10) against 189.60 -> exit at the open 185.20 (backtest 09:47).
         for m in self.each_module():
             ts = m.pd.Timestamp("2026-11-18 09:39:00", tz=m.IST)
             # rebuild 1 (no tick since the close): the rebuild itself raises 145.60 -> 189.60
             prev0 = {"side": "PE", "trailing_stop_price": 145.6}
-            self.assertEqual(m.paper_candle_check_stop(prev0, "PE", ts, True), 145.6)
+            self.assertEqual(m.paper_candle_check_stop(prev0, "PE", ts), 145.6)
             rebuilt1 = {"side": "PE", "trailing_stop_price": 189.6,
-                        **m.rebuild_close_arm(prev0, {}, ts, 145.6, 189.6)}
-            self.assertEqual(rebuilt1["stop_before_close_arm"], 145.6)
+                        **m.candle_raise_updates(prev0, {}, ts, 145.6, 189.6)}
             # rebuild 2 of the same candle: previous stop is already 189.60 (no raise now)
-            self.assertEqual(m.paper_candle_check_stop(rebuilt1, "PE", ts, True), 145.6)
+            self.assertEqual(m.paper_candle_check_stop(rebuilt1, "PE", ts), 145.6)
             rebuilt2 = {"side": "PE", "trailing_stop_price": 189.6,
-                        **m.rebuild_close_arm(rebuilt1, {}, ts, 189.6, 189.6)}
-            self.assertEqual(m.paper_candle_check_stop(rebuilt2, "PE", ts, True), 145.6)
+                        **m.candle_raise_updates(rebuilt1, {}, ts, 189.6, 189.6)}
+            self.assertEqual(m.paper_candle_check_stop(rebuilt2, "PE", ts), 145.6)
             # record kept from the persisted copy when the previous position lacks it
-            tick_armed = {"close_arm_candle": "2026-11-18 09:39", "stop_before_close_arm": 145.6}
-            self.assertEqual(m.rebuild_close_arm({"side": "PE"}, tick_armed, ts, 189.6, 189.6), tick_armed)
+            tick_rec = {"stop_before_candle": {"2026-11-18 09:39": 145.6}}
+            self.assertEqual(m.candle_raise_updates({"side": "PE"}, tick_rec, ts, 189.6, 189.6), tick_rec)
             # the next candle is tested against the raised stop
             nxt = ts + m.pd.Timedelta(minutes=1)
-            self.assertEqual(m.rebuild_close_arm(rebuilt2, {}, nxt, 189.6, 189.6), {})
-            self.assertEqual(m.paper_candle_check_stop(rebuilt2, "PE", nxt, True), 189.6)
+            self.assertEqual(m.paper_candle_check_stop(rebuilt2, "PE", nxt), 189.6)
+
+    def test_tick_raise_skips_its_own_candle(self):
+        # 18 Nov v28 paper: PE entry 177.35; a tick at 228 during the 09:45 candle armed
+        # +50 -> stop 222.35 (stop before: 187.35). The candle check tested 09:45's low
+        # (215.60, printed before the high) against 222.35 and exited at 215.60; the market
+        # crossed 222.35 at 09:46. Rebuilds of 09:45 keep running while 09:46 ticks raise
+        # the stop further, so both candles' records must be kept.
+        for m in self.each_module():
+            c45 = m.pd.Timestamp("2026-11-18 09:45:00", tz=m.IST)
+            tick = m.pd.Timestamp("2026-11-18 09:45:41", tz=m.IST)   # tick time -> forming candle
+            pos = {"side": "PE", "trailing_stop_price": 222.35,
+                   **m.candle_raise_updates({}, {}, tick, 187.35, 222.35)}
+            self.assertEqual(m.paper_candle_check_stop(pos, "PE", c45), 187.35)
+            # rebuild of 09:45 (its high also gives 222.35): record carried, no new entry
+            rebuilt = {"side": "PE", "trailing_stop_price": 222.35,
+                       **m.candle_raise_updates(pos, pos, c45, 222.35, 222.35)}
+            self.assertEqual(m.paper_candle_check_stop(rebuilt, "PE", c45), 187.35)
+            # a 09:46 tick raises again; 09:45 is still tested against 187.35
+            t46 = m.pd.Timestamp("2026-11-18 09:46:05", tz=m.IST)
+            later = {"side": "PE", "trailing_stop_price": 232.35,
+                     **m.candle_raise_updates(rebuilt, rebuilt, t46, 222.35, 232.35)}
+            self.assertEqual(m.paper_candle_check_stop(later, "PE", c45), 187.35)
+            self.assertEqual(m.paper_candle_check_stop(later, "PE", t46.floor("min")), 222.35)
+            # only the newest few candles are kept
+            stop, rec = 150.0, {}
+            for i in range(m.CANDLE_RAISE_KEEP + 3):
+                rec = m.candle_raise_updates(rec, {}, c45 + m.pd.Timedelta(minutes=i), stop, stop + 1)
+                stop += 1
+            self.assertEqual(len(rec["stop_before_candle"]), m.CANDLE_RAISE_KEEP)
+            self.assertIn(m.candle_minute_key(c45 + m.pd.Timedelta(minutes=m.CANDLE_RAISE_KEEP + 2)),
+                          rec["stop_before_candle"])
 
 
 class PapertradeNiftySummaryTests(StrategyTestCase):

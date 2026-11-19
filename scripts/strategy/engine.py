@@ -2228,56 +2228,54 @@ def candle_minute_key(value) -> str:
     return ts.strftime("%Y-%m-%d %H:%M")
 
 
-def close_arm_updates(position: dict, persisted: dict, candle_ts, stop_before: float, stop_after: float) -> dict:
-    """TRAIL_ON_CLOSE bookkeeping when a completed candle's close raises the paper stop.
+CANDLE_RAISE_KEEP = 5   # candles kept in a position's stop_before_candle record
 
-    Remembers which candle armed the stop and the stop in place before it, so the
-    end-of-candle check tests that same candle against the earlier stop (a stop armed
-    by a close applies from the next candle, as in the backtest). Several ticks after
-    the same close keep the first 'before' value.
+
+def candle_raise_updates(position: dict, persisted: dict, candle_ts, stop_before: float, stop_after: float) -> dict:
+    """Bookkeeping for the end-of-candle paper check: the stop each candle opened with.
+
+    A stop raised by a candle's own prices (its live ticks / high, or under
+    TRAIL_ON_CLOSE its close) applies from the next candle, as in the backtest, so
+    the end-of-candle check must test that candle's low against the stop in place
+    before the raise. Returns {"stop_before_candle": {candle minute: stop before the
+    first raise attributed to it}}, merged from both positions (the rebuild replaces
+    the position with a fresh dict on every tick batch, so the record is carried
+    over), plus a new entry when stop_after > stop_before. {} when there is nothing.
+
+    18 Nov: v30 lost the record on the next rebuild and exited 09:39 at the open 185.20
+    (backtest 09:47); v28 tested 09:45's low 215.60 against the stop a 09:45 tick high
+    had raised to 222.35 and exited at 215.60 (market crossed it at 09:46).
     """
-    key = candle_minute_key(candle_ts)
-    if not key or safe_float(stop_after, 0.0) <= safe_float(stop_before, 0.0):
-        return {}
+    merged: dict = {}
     for source in (position or {}, persisted or {}):
-        if source.get("close_arm_candle") == key:
-            return {"close_arm_candle": key, "stop_before_close_arm": source.get("stop_before_close_arm")}
-    return {"close_arm_candle": key, "stop_before_close_arm": round(safe_float(stop_before, 0.0), 2)}
-
-
-def rebuild_close_arm(previous_open: dict, persisted: dict, candle_ts, stop_before: float, stop_after: float) -> dict:
-    """close_arm_updates for the paper candle rebuild (TRAIL_ON_CLOSE).
-
-    The rebuild runs on every tick batch and replaces the open position with a fresh
-    dict, so the close-arm record must be carried into it; otherwise the next rebuild
-    of the same candle tests its low against the stop its own close raised (18 Nov:
-    exit 09:39 at the open 185.20, backtest 09:47). Keeps an existing record for this
-    candle; records a new one when this rebuild raised the stop.
-    """
+        record = source.get("stop_before_candle") if isinstance(source, dict) else None
+        for key, value in (record.items() if isinstance(record, dict) else []):
+            before = safe_float(value, 0.0)
+            if key and before > 0:
+                merged[str(key)] = min(merged.get(str(key), before), before)
     key = candle_minute_key(candle_ts)
-    if not key:
+    before = safe_float(stop_before, 0.0)
+    if key and key not in merged and before > 0 and safe_float(stop_after, 0.0) > before:
+        merged[key] = round(before, 2)
+    if not merged:
         return {}
-    for source in (previous_open or {}, persisted or {}):
-        before = safe_float(source.get("stop_before_close_arm"), 0.0)
-        if source.get("close_arm_candle") == key and before > 0:
-            return {"close_arm_candle": key, "stop_before_close_arm": before}
-    return close_arm_updates({}, {}, candle_ts, stop_before, stop_after)
+    return {"stop_before_candle": {k: merged[k] for k in sorted(merged)[-CANDLE_RAISE_KEEP:]}}
 
 
-def paper_candle_check_stop(previous_open, side: str, candle_ts, trail_on_close: bool) -> float:
+def paper_candle_check_stop(previous_open, side: str, candle_ts) -> float:
     """Stop the end-of-candle paper check tests the newest candle's low against.
 
-    That is the previous rebuild's stop, except under TRAIL_ON_CLOSE when the newest
-    candle's own close raised it: then the stop before that raise. 0.0 when unknown.
+    The previous rebuild's stop, or the stop before a raise that came from this
+    candle's own prices (see candle_raise_updates). 0.0 when unknown.
     """
     if not isinstance(previous_open, dict) or str(previous_open.get("side") or "").upper() != str(side or "").upper():
         return 0.0
     stop = safe_float(previous_open.get("trailing_stop_price"), 0.0)
-    if trail_on_close:
-        key = candle_minute_key(candle_ts)
-        before = safe_float(previous_open.get("stop_before_close_arm"), 0.0)
-        if key and previous_open.get("close_arm_candle") == key and before > 0:
-            stop = min(stop, before) if stop > 0 else before
+    record = previous_open.get("stop_before_candle")
+    key = candle_minute_key(candle_ts)
+    before = safe_float(record.get(key), 0.0) if isinstance(record, dict) and key else 0.0
+    if before > 0:
+        stop = min(stop, before) if stop > 0 else before
     return stop
 
 
@@ -4980,18 +4978,17 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                             previous_trailing_stop,
                             current_trailing_stop,
                         )
-                        if TRAIL_ON_CLOSE:
-                            # Carry the close-arm record into the fresh rebuilt position
-                            # (or record one when this rebuild raised the stop from the
-                            # newest close), so later rebuilds of the same candle still
-                            # test it against the stop in place before that close.
-                            paper_open.update(rebuild_close_arm(
-                                previous_paper_open,
-                                live_state.get("paper_open_position") or {},
-                                day.iloc[-1].get("ce_ts" if current_side == "CE" else "pe_ts") or day.iloc[-1].get("spot_ts"),
-                                previous_trailing_stop,
-                                paper_open["trailing_stop_price"],
-                            ))
+                        # Carry the stop-before-candle record into the fresh rebuilt
+                        # position (and add one when this rebuild raised the stop from
+                        # the newest candle's high / close), so later rebuilds of the
+                        # same candle still test it against the stop it opened with.
+                        paper_open.update(candle_raise_updates(
+                            previous_paper_open,
+                            live_state.get("paper_open_position") or {},
+                            day.iloc[-1].get("ce_ts" if current_side == "CE" else "pe_ts") or day.iloc[-1].get("spot_ts"),
+                            previous_trailing_stop,
+                            paper_open["trailing_stop_price"],
+                        ))
                         paper_open["trailing_stop_active"] = bool(
                             previous_paper_open.get("trailing_stop_active")
                             or paper_open.get("trailing_stop_active")
@@ -5012,14 +5009,13 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 )
                 emergency_stop = safe_float(paper_open.get("emergency_sl_price"), 0.0)
                 # Without a tick-triggered exit, test the newest candle against the stop
-                # in place when it opened (the previous rebuild's stop): a stop raised
-                # from this candle's high, or (TRAIL_ON_CLOSE) its close, only applies
-                # from the next candle.
+                # in place when it opened: a stop raised from this candle's own ticks /
+                # high, or (TRAIL_ON_CLOSE) its close, only applies from the next candle.
+                # A real cross after such a raise is the tick path's exit.
                 paper_prev_stop = paper_candle_check_stop(
                     previous_paper_open,
                     paper_side,
                     day.iloc[-1].get("ce_ts" if paper_side == "CE" else "pe_ts") or day.iloc[-1].get("spot_ts"),
-                    TRAIL_ON_CLOSE,
                 )
                 paper_stop = safe_float(
                     paper_pending.get("stop") if pending_matches else (paper_prev_stop or emergency_stop),
@@ -5980,10 +5976,13 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             min_trigger = None
         if min_trigger is not None and pnl_points_high < min_trigger and trailing_stop > option_ltp:
             trailing_stop = current_stop
-        if TRAIL_ON_CLOSE:
-            open_position.update(close_arm_updates(
-                open_position, persisted_open_position,
-                last_completed_option_candle_ts(live_state, side), current_stop, trailing_stop))
+        # Remember the stop the raising candle opened with: under TRAIL_ON_CLOSE the raise
+        # comes from the newest completed candle's close, otherwise from this tick, i.e.
+        # the forming candle. The end-of-candle check tests that candle against it.
+        open_position.update(candle_raise_updates(
+            open_position, persisted_open_position,
+            last_completed_option_candle_ts(live_state, side) if TRAIL_ON_CLOSE else current_time,
+            current_stop, trailing_stop))
 
         open_position.update({
             "best_price": round(best_price, 2),
