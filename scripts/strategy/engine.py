@@ -223,7 +223,7 @@ BLOCK_SAME_SYMBOL_REENTRY_WITHIN_MINUTES = 5
 SAME_SYMBOL_MIN_REENTRY_DROP_POINTS = 20.0  # After a same-symbol exit, only re-enter if option price is at least this many points below the previous exit price (0 = disabled)
 ENTRY_CONFIRM_DELAY_SECONDS = 2
 SIMULATE_LIVE_EXECUTION_IN_PAPERTRADE = False
-SIMULATE_LIVE_EXECUTION_IN_BACKTEST = True  # apply BACKTEST_*_SLIPPAGE_POINTS below to backtest fills
+SIMULATE_LIVE_EXECUTION_IN_BACKTEST = False  # True = apply BACKTEST_*_SLIPPAGE_POINTS below to backtest fills (off since 19 Nov 2026: fills at signal/stop price, like paper)
 PAPER_ENTRY_SLIPPAGE_MODE = "NONE"    # FIXED / PCT / NONE
 PAPER_ENTRY_SLIPPAGE_POINTS = 2.0
 PAPER_ENTRY_SLIPPAGE_PCT = 0.005
