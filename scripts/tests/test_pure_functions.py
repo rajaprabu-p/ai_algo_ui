@@ -93,7 +93,12 @@ class VariantSettingsTests(unittest.TestCase):
             if key.startswith("__") or callable(value) or isinstance(value, type(os)):
                 continue
             with self.subTest(setting=key):
-                self.assertEqual(repr(value), repr(b[key]))
+                other = b[key]
+                if isinstance(value, (set, frozenset)) and isinstance(other, (set, frozenset)):
+                    # A set's repr order can differ between runs; compare the members.
+                    self.assertEqual(sorted(map(repr, value)), sorted(map(repr, other)))
+                else:
+                    self.assertEqual(repr(value), repr(other))
 
     def test_unknown_variant_rejected(self):
         from strategy import variants
