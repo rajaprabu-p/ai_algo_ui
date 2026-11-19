@@ -545,6 +545,23 @@ def get_trailing_profit_status(pnl_points: float, current_time=None, stage1_trig
     return ",".join(triggered)
 
 
+def trade_trailing_status(exit_reason, exit_time, entry_price, high_price) -> str:
+    """Closed-trade trailing label, same rule as the backtest trade record:
+    '<stage>_hit' for a trailing exit, '<stage>_armed' if the high reached the first
+    rung, else 'not_reached_target'. <stage> is stage1/stage2 by exit time."""
+    try:
+        stage = "stage2" if pd.Timestamp(exit_time).strftime("%H:%M") >= TRAILING_PROFIT_STAGE2_TIME else "stage1"
+    except Exception:
+        stage = "stage1"
+    if str(exit_reason or "").upper() in {"TRAILING_SL_HIT", "TRAILING_STOP_HIT"}:
+        return f"{stage}_hit"
+    ladder = TRAILING_PROFIT_STAGE2 if stage == "stage2" else TRAILING_PROFIT_STAGE1
+    trigger = float(ladder[0][0]) if ladder else 50.0
+    entry = safe_float(entry_price, 0.0)
+    max_profit = safe_float(high_price, entry) - entry if entry > 0 else 0.0
+    return f"{stage}_armed" if max_profit >= trigger else "not_reached_target"
+
+
 def update_stage2_peak(prev_peak, price, current_time=None):
     """Highest option price since the stage-2 switch; None while stage 1 is active."""
     if get_active_trailing_stages(current_time) is not TRAILING_PROFIT_STAGE2:
@@ -2266,16 +2283,25 @@ def paper_candle_check_stop(previous_open, side: str, candle_ts) -> float:
     """Stop the end-of-candle paper check tests the newest candle's low against.
 
     The previous rebuild's stop, or the stop before a raise that came from this
-    candle's own prices (see candle_raise_updates). 0.0 when unknown.
+    candle's own prices or from any later candle (see candle_raise_updates). 0.0
+    when unknown.
+
+    19 Nov v28: a 10:00 tick raised the stop to 191.05 while the 09:59 candle was
+    still the newest completed one; the next rebuild tested 09:59's low against
+    191.05 and exited at its open 184.00 (backtest held to 199.15 at 10:02).
     """
     if not isinstance(previous_open, dict) or str(previous_open.get("side") or "").upper() != str(side or "").upper():
         return 0.0
     stop = safe_float(previous_open.get("trailing_stop_price"), 0.0)
     record = previous_open.get("stop_before_candle")
     key = candle_minute_key(candle_ts)
-    before = safe_float(record.get(key), 0.0) if isinstance(record, dict) and key else 0.0
-    if before > 0:
-        stop = min(stop, before) if stop > 0 else before
+    if isinstance(record, dict) and key:
+        # Keys are 'YYYY-MM-DD HH:MM', so string order is time order.
+        befores = [safe_float(v, 0.0) for k, v in record.items() if str(k) >= key]
+        befores = [b for b in befores if b > 0]
+        if befores:
+            before = min(befores)
+            stop = min(stop, before) if stop > 0 else before
     return stop
 
 
@@ -4258,11 +4284,21 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             realized_rs = safe_float(trades.attrs.get("realized_mtm_rs"), 0.0) if hasattr(trades, "attrs") else 0.0
             total_mtm_rs = realized_rs + unrealized_rs
             trade_count = get_execution_entry_count()
-            peak_points = max(
-                unrealized_points,
-                safe_float(open_pos.get("high_during_trade"), current_option_price) - entry_price,
-                safe_float(open_pos.get("best_price"), current_option_price) - entry_price,
-            )
+            if TRAIL_ON_CLOSE:
+                # The stop follows completed candle closes, so label the rungs those reached,
+                # not the intra-minute high (19 Nov v30: label showed 25->15 on a 182.80 high
+                # while the best close was 178.90 and the stop never moved).
+                peak_points = max(
+                    safe_float(open_pos.get("trail_best_price"), entry_price),
+                    safe_float((live_state.get("paper_open_position") or {}).get("trail_best_price"), entry_price),
+                    entry_price,
+                ) - entry_price
+            else:
+                peak_points = max(
+                    unrealized_points,
+                    safe_float(open_pos.get("high_during_trade"), current_option_price) - entry_price,
+                    safe_float(open_pos.get("best_price"), current_option_price) - entry_price,
+                )
             trailing_status = get_trailing_profit_status(
                 peak_points,
                 current_time=now_local,
@@ -5077,7 +5113,9 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         "emergency_sl_pct_used": safe_float(paper_open.get("emergency_sl_pct_used"), 0.0),
                         "emergency_sl_price": safe_float(paper_open.get("emergency_sl_price"), np.nan),
                         "target_profit_points": safe_float(paper_open.get("target_profit_points"), 50.0),
-                        "trailing_status": "stage2_hit" if pd.Timestamp(paper_exit_ts).strftime("%H:%M") >= TRAILING_PROFIT_STAGE2_TIME else "stage1_hit",
+                        "trailing_status": trade_trailing_status(
+                            paper_exit_reason, paper_exit_ts, paper_entry_price,
+                            safe_float(paper_open.get("high_during_trade"), paper_entry_price)),
                     }
                     ensure_trade_charges(paper_trade)
                     trades = pd.concat([trades, pd.DataFrame([paper_trade])], ignore_index=True)

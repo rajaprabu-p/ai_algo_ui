@@ -655,6 +655,34 @@ class TrailOnCloseLiveTests(StrategyTestCase):
             nxt = ts + m.pd.Timedelta(minutes=1)
             self.assertEqual(m.paper_candle_check_stop(rebuilt2, "PE", nxt), 189.6)
 
+    def test_trade_trailing_status_matches_backtest_rule(self):
+        # 19 Nov paper rows said stage1_hit for EMERGENCY_SL_HIT exits.
+        for m in self.each_module():
+            first = float(m.TRAILING_PROFIT_STAGE1[0][0])
+            t = "2026-11-19 09:37:59+05:30"
+            self.assertEqual(m.trade_trailing_status("TRAILING_STOP_HIT", t, 100.0, 101.0), "stage1_hit")
+            self.assertEqual(m.trade_trailing_status("EMERGENCY_SL_HIT", t, 100.0, 100.0 + first), "stage1_armed")
+            self.assertEqual(m.trade_trailing_status("EMERGENCY_SL_HIT", t, 100.0, 100.0 + first - 0.05), "not_reached_target")
+            self.assertEqual(m.trade_trailing_status("TRAILING_STOP_HIT", "2026-11-19 11:00:00+05:30", 100.0, 101.0), "stage2_hit")
+
+    def test_later_candle_raise_not_applied_to_earlier_candle(self):
+        # 19 Nov v28 paper: CE entry 146.05, stop 156.05 (+30 rung). A 10:00 tick at 197.40
+        # armed +50 -> 191.05 while 09:59 was still the newest completed candle; the next
+        # rebuild tested 09:59's low (~180) against 191.05 and exited at its open 184.00.
+        for m in self.each_module():
+            c0959 = m.pd.Timestamp("2026-11-19 09:59", tz=m.IST)
+            c1000 = c0959 + m.pd.Timedelta(minutes=1)
+            prev = {"side": "CE", "trailing_stop_price": 191.05,
+                    **m.candle_raise_updates({}, {}, c1000, 156.05, 191.05)}
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", c0959), 156.05)
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", c1000), 156.05)  # its own candle
+            self.assertEqual(m.paper_candle_check_stop(prev, "CE", c1000 + m.pd.Timedelta(minutes=1)), 191.05)
+            # two raises in later candles -> the lowest (the stop in place at 09:59)
+            prev2 = {"side": "CE", "trailing_stop_price": 199.15,
+                     "stop_before_candle": {"2026-11-19 10:00": 156.05, "2026-11-19 10:01": 191.05}}
+            self.assertEqual(m.paper_candle_check_stop(prev2, "CE", c0959), 156.05)
+            self.assertEqual(m.paper_candle_check_stop(prev2, "CE", c1000 + m.pd.Timedelta(minutes=1)), 191.05)
+
     def test_tick_raise_skips_its_own_candle(self):
         # 18 Nov v28 paper: PE entry 177.35; a tick at 228 during the 09:45 candle armed
         # +50 -> stop 222.35 (stop before: 187.35). The candle check tested 09:45's low
