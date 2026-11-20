@@ -284,6 +284,34 @@ class BacktestCostsTests(StrategyTestCase):
             self.assertEqual(m.option_round_trip_charges(0, 0, 65)["total"], 0.0)
 
 
+class ExecutionProfitLockTests(StrategyTestCase):
+    SETTINGS = dict(ENABLE_PROFIT_LOCK=True, PROFIT_LOCK_TRIGGER_RS=2500, PROFIT_LOCK_PERCENT=0.70,
+                    PROFIT_LOCK_AFTER_TRADE_NO=1)
+
+    def run_lock(self, m, armed_level, realized, completed, has_open_trade):
+        state = dict(profit_lock_active=armed_level is not None, profit_lock_level=armed_level or 0.0)
+        with mock.patch.multiple(m, **self.SETTINGS, **state), mock.patch("builtins.print"):
+            return m.execution_profit_lock_hit(realized, completed, has_open_trade), m.profit_lock_level
+
+    def test_lock_armed_from_open_mtm_does_not_stop_open_trade(self):
+        # 20 Nov v28 paper: the replay armed the lock at total MTM ~2617 (level ~1832) during
+        # trade 2; realized was only 627.25, and the session must keep managing the trade.
+        for m in self.each_module():
+            self.assertEqual(self.run_lock(m, 1832.0, 627.25, 1, True), (False, 1832.0))
+
+    def test_lock_stops_once_flat_at_or_below_level(self):
+        for m in self.each_module():
+            self.assertTrue(self.run_lock(m, 1832.0, 1500.0, 2, False)[0])
+            self.assertFalse(self.run_lock(m, 1832.0, 2275.0, 2, False)[0])
+
+    def test_arms_on_realized_after_first_trade(self):
+        for m in self.each_module():
+            self.assertEqual(self.run_lock(m, None, 3000.0, 1, False), (False, 2100.0))
+            self.assertEqual(self.run_lock(m, None, 3000.0, 0, False), (False, 0.0))   # no completed trade
+            with mock.patch.object(m, "ENABLE_PROFIT_LOCK", False):
+                self.assertFalse(m.execution_profit_lock_hit(0.0, 5, False))
+
+
 class SymbolHelperTests(StrategyTestCase):
     def test_extract_option_strike(self):
         for m in self.each_module():

@@ -497,6 +497,32 @@ profit_lock_active = False
 profit_lock_level = 0.0
 completed_trades_for_profit_lock = 0
 
+
+def execution_profit_lock_hit(realized_pnl_rs: float, completed_trades: int, has_open_trade: bool) -> bool:
+    """Profit-lock session stop for LIVE_ORDER / PAPERTRADE_LIVE, measured on realized P&L.
+
+    While a trade is open the lock is left to the candle replay, which compares the
+    lock level against total MTM (realized + open) and exits the trade with
+    PROFIT_LOCK_HIT, exactly as the backtest does. The replay can also arm the lock
+    from total MTM, so comparing realized P&L alone against that level here would
+    stop the session and close a winning trade the moment the lock arms
+    (20 Nov 2026 v28 paper: realized 627 vs level ~1830).
+    """
+    global profit_lock_active, profit_lock_level
+    if not ENABLE_PROFIT_LOCK:
+        return False
+    if (
+        (not profit_lock_active)
+        and completed_trades >= PROFIT_LOCK_AFTER_TRADE_NO
+        and realized_pnl_rs >= PROFIT_LOCK_TRIGGER_RS
+    ):
+        profit_lock_active = True
+        profit_lock_level = realized_pnl_rs * PROFIT_LOCK_PERCENT
+        print(f"[PROFIT LOCK ARMED] MTM={realized_pnl_rs:.2f} Lock Level={profit_lock_level:.2f}")
+    if has_open_trade:
+        return False
+    return profit_lock_active and realized_pnl_rs <= profit_lock_level
+
 def parse_hhmm_to_time(value: str) -> dtime:
     return datetime.strptime(str(value).strip(), "%H:%M").time()
 
@@ -4069,15 +4095,12 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
 
         if execution_mode in {"LIVE_ORDER", "PAPERTRADE_LIVE"}:
             live_realized_pnl = get_execution_realized_pnl()
-            if ENABLE_PROFIT_LOCK:
-                global profit_lock_active, profit_lock_level
-                completed = len(live_state.get("live_trade_events") or [])
-                if (not profit_lock_active) and completed >= PROFIT_LOCK_AFTER_TRADE_NO and live_realized_pnl >= PROFIT_LOCK_TRIGGER_RS:
-                    profit_lock_active = True
-                    profit_lock_level = live_realized_pnl * PROFIT_LOCK_PERCENT
-                    print(f"[PROFIT LOCK ARMED] MTM={live_realized_pnl:.2f} Lock Level={profit_lock_level:.2f}")
-                if profit_lock_active and live_realized_pnl <= profit_lock_level:
-                    return "PROFIT_LOCK_HIT"
+            if execution_profit_lock_hit(
+                live_realized_pnl,
+                len(live_state.get("live_trade_events") or []),
+                has_open_trade,
+            ):
+                return "PROFIT_LOCK_HIT"
             if live_realized_pnl >= safe_float(DAILY_PROFIT_TARGET_RS, 0.0):
                 return "DAILY_PROFIT_TARGET"
             if live_realized_pnl <= safe_float(DAILY_LOSS_LIMIT_RS, 0.0):
