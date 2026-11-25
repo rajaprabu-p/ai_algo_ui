@@ -5,6 +5,7 @@ except Exception:
     KiteConnect = None
 import subprocess
 import os
+import shutil
 import signal
 import sys
 import time
@@ -251,10 +252,53 @@ def strategy_python_executable() -> str:
 
 
 def strategy_process_options() -> dict:
-    """Create a Windows process group so Ctrl-Break reaches the strategy child."""
+    """Windows: own process group so Ctrl-Break reaches the strategy child.
+    POSIX: own session, so a terminal/tmux Ctrl+C or hang-up aimed at the
+    dashboard never reaches a running strategy."""
     if os.name == "nt":
         return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
-    return {}
+    return {"start_new_session": True}
+
+
+_SYSTEMD_SCOPE_OK = None
+
+
+def systemd_scope_available() -> bool:
+    """True when strategies can be launched in their own systemd scope (checked once)."""
+    global _SYSTEMD_SCOPE_OK
+    if _SYSTEMD_SCOPE_OK is None:
+        _SYSTEMD_SCOPE_OK = False
+        exe = shutil.which("systemd-run") if os.name != "nt" else None
+        if exe and os.path.isdir("/run/systemd/system"):
+            try:
+                probe = subprocess.run([exe, "--scope", "--quiet", "--collect", "true"],
+                                       capture_output=True, timeout=15)
+                _SYSTEMD_SCOPE_OK = probe.returncode == 0
+                probe_error = (probe.stderr or b"").decode(errors="ignore").strip()
+            except Exception as exc:
+                _SYSTEMD_SCOPE_OK = False
+                probe_error = str(exc)
+            if not _SYSTEMD_SCOPE_OK:
+                print(f"[STRATEGY LAUNCH] WARNING: systemd-run --scope unavailable ({probe_error or 'failed'}); "
+                      f"strategies stay in the dashboard's service and a service restart will stop them.",
+                      flush=True)
+    return _SYSTEMD_SCOPE_OK
+
+
+def detached_strategy_command(cmd: list, name: str) -> list:
+    """Wrap a strategy command so restarting the dashboard's service cannot stop it.
+
+    Under systemd, `systemctl restart` signals every process in the service's
+    cgroup, including strategies the dashboard started; their stop handler then
+    squares off (LIVE_ORDER). `systemd-run --scope` moves the strategy into its
+    own scope. It execs the command, so the PID (pidfile, Stop button) is the
+    strategy's own. Without systemd-run the command is returned unchanged.
+    """
+    if not systemd_scope_available():
+        return list(cmd)
+    safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", str(name or "strategy"))
+    unit = f"ai-algo-{safe_name}-{datetime.now(IST).strftime('%Y%m%d-%H%M%S')}"
+    return [shutil.which("systemd-run"), "--scope", "--quiet", "--collect", f"--unit={unit}"] + list(cmd)
 
 
 def current_log_pointer_for(name: str) -> str:
@@ -463,7 +507,7 @@ def start_strategy(args: list = None) -> tuple[bool, str]:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
-            cmd,
+            detached_strategy_command(cmd, "strategy"),
             cwd=WORKDIR,
             stdout=logf,
             stderr=subprocess.STDOUT,
@@ -531,7 +575,7 @@ def start_named_strategy(name: str, script: str, args: list = None, mode: str = 
         except Exception:
             pass
         proc = subprocess.Popen(
-            cmd,
+            detached_strategy_command(cmd, name),
             cwd=WORKDIR,
             stdout=logf,
             stderr=subprocess.STDOUT,
