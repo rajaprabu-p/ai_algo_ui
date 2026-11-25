@@ -2383,6 +2383,53 @@ def is_signal_too_old(signal_ts, now_ts) -> bool:
     return (nowv - sig).total_seconds() > safe_int(MAX_ENTRY_SIGNAL_AGE_SECONDS, 20)
 
 
+def _as_ist_timestamp(value) -> Optional[pd.Timestamp]:
+    if value is None:
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return None
+    if pd.isna(ts):
+        return None
+    return ts.tz_localize(IST) if ts.tzinfo is None else ts.tz_convert(IST)
+
+
+def strike_switch_entry_floor(switch_candle_ts, current_floor=None) -> Optional[pd.Timestamp]:
+    """First candle a paper/live rebuild may enter on after a strike switch.
+
+    A switch replaces the CE/PE candles with the new strike's full-day history.
+    Rebuilding from the session start then replays the morning on that strike
+    and reports trades the bot never took (25 Nov 2026: 25850CE "bought" at
+    09:39 while the bot was on 25750CE at 248, blocked by the premium cap).
+    Like the backtest, the switch candle itself is the first one priced on the
+    new strike. The floor only moves forward.
+    """
+    switch_ts = _as_ist_timestamp(switch_candle_ts)
+    floor_ts = _as_ist_timestamp(current_floor)
+    if switch_ts is None:
+        return floor_ts
+    switch_ts = switch_ts.floor("min")
+    return switch_ts if floor_ts is None else max(floor_ts, switch_ts)
+
+
+def is_stale_unannounced_trade(entry_time, now_ts, session_start, buy_already_printed: bool) -> bool:
+    """True for a rebuilt closed trade whose BUY was never emitted and whose entry is too old.
+
+    Such a trade was simulated after the fact, not taken live, so it must not be
+    reported. Entries before the session start are left alone (restart recovery).
+    """
+    if buy_already_printed:
+        return False
+    entry_ts = _as_ist_timestamp(entry_time)
+    start_ts = _as_ist_timestamp(session_start)
+    if entry_ts is None:
+        return False
+    if start_ts is not None and entry_ts < start_ts:
+        return False
+    return is_signal_too_old(entry_ts, now_ts)
+
+
 def should_skip_entry_for_slippage(signal_price: float, actual_price: float) -> bool:
     if not SKIP_ENTRY_IF_TOO_MUCH_SLIPPAGE:
         return False
@@ -3791,6 +3838,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             return
 
         spot_ltp_now = 0.0
+        selection_ts = None
         try:
             if forced_pair is not None:
                 new_ce_symbol, new_pe_symbol, new_ce_token, new_pe_token = forced_pair
@@ -3871,6 +3919,18 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 )
                 live_state["last_symbol_refresh_unchanged_key"] = unchanged_key
             return
+
+        # The candles below are replaced with the new strike's full-day history.
+        # Stop the next rebuild from entering on candles before the switch.
+        # forced_pair (strike lock) is not a fresh selection, so it keeps the floor.
+        if forced_pair is None and old_ce_token > 0 and old_pe_token > 0:
+            new_floor = strike_switch_entry_floor(selection_ts, live_state.get("strike_switch_entry_floor_ts"))
+            if new_floor is not None and new_floor != live_state.get("strike_switch_entry_floor_ts"):
+                live_state["strike_switch_entry_floor_ts"] = new_floor
+                print(
+                    f"[SYMBOL REFRESH ENTRY FLOOR] reason={reason} entries from "
+                    f"{new_floor.strftime('%H:%M')} IST on {new_ce_symbol}/{new_pe_symbol}"
+                )
 
         for token in [old_ce_token, old_pe_token]:
             if token > 0:
@@ -4935,6 +4995,10 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 )
             except Exception:
                 strategy_tracking_start = live_tracking_start
+        switch_floor = live_state.get("strike_switch_entry_floor_ts")
+        if execution_mode in {"LIVE_ORDER", "PAPERTRADE_LIVE"} and switch_floor is not None:
+            # Strike switches happen only when flat, so no open trade starts before the floor.
+            strategy_tracking_start = strike_switch_entry_floor(switch_floor, strategy_tracking_start)
         # The open trade is already in the execution entry count. Count only the
         # entries before it, or MAX_TRADES stops the rebuild before it can
         # re-create the open trade and its stops are never evaluated.
@@ -5211,6 +5275,21 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     # Only process trades that are backed by a tracked broker entry.
                     if closed_order_event_id not in live_state["broker_positions"]:
                         continue
+                elif is_stale_unannounced_trade(
+                    trade["entry_time"],
+                    live_state.get("last_tick_exchange_ts") or datetime.now(IST),
+                    session_start_minute,
+                    closed_order_event_id in live_state["printed_buy_event_ids"],
+                ):
+                    # The rebuild simulated this trade after the fact (no BUY was
+                    # emitted when it "entered"), so it was never taken. Drop it once.
+                    print(
+                        f"[{execution_mode} STALE TRADE DROPPED] {trade['side']} {trade.get('option_symbol')} "
+                        f"entry={trade['entry_time']} exit={trade['exit_time']} reason={trade['entry_reason']} "
+                        f"(no BUY was emitted at entry time)"
+                    )
+                    live_state["printed_trade_ids"].add(trade_id)
+                    continue
 
                 sell_event_id = trade_id
                 # Emit BUY event for this trade if not already printed

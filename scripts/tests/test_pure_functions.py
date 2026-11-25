@@ -312,6 +312,47 @@ class ExecutionProfitLockTests(StrategyTestCase):
                 self.assertFalse(m.execution_profit_lock_hit(0.0, 5, False))
 
 
+class StrikeSwitchReplayTests(StrategyTestCase):
+    """25 Nov 2026: a strike switch replayed the morning on the new strike and
+    reported trades the bot never took (25850CE "bought" at 09:39 at 199.75)."""
+
+    @staticmethod
+    def ist(hhmmss):
+        return pd.Timestamp(f"2026-11-25 {hhmmss}", tz="Asia/Kolkata")
+
+    def test_floor_is_the_switch_candle_and_only_moves_forward(self):
+        for m in self.each_module():
+            # 10:40:21 switch selected from the completed 10:39 spot candle.
+            floor = m.strike_switch_entry_floor(self.ist("10:39:00"))
+            self.assertEqual(floor, self.ist("10:39:00"))
+            self.assertEqual(m.strike_switch_entry_floor(self.ist("11:00:00"), floor), self.ist("11:00:00"))
+            self.assertEqual(m.strike_switch_entry_floor(self.ist("10:20:00"), floor), floor)
+            self.assertEqual(m.strike_switch_entry_floor(None, floor), floor)
+            self.assertIsNone(m.strike_switch_entry_floor(None, None))
+            # A tick-time fallback is floored to its minute; naive times are IST.
+            self.assertEqual(m.strike_switch_entry_floor(pd.Timestamp("2026-11-25 09:15:59")), self.ist("09:15:00"))
+
+    def test_floor_keeps_rebuild_from_entering_before_the_switch(self):
+        for m in self.each_module():
+            start = m.strike_switch_entry_floor(self.ist("10:39:00"), self.ist("09:00:00"))
+            self.assertGreater(start, self.ist("09:39:00"))   # the phantom 09:39 entry is skipped
+
+    def test_replayed_trade_without_buy_is_stale(self):
+        session_start = self.ist("09:00:00")
+        with_age = dict(MAX_ENTRY_SIGNAL_AGE_SECONDS=150)
+        for m in self.each_module():
+            with mock.patch.multiple(m, **with_age):
+                now = self.ist("10:40:21")
+                self.assertTrue(m.is_stale_unannounced_trade(self.ist("09:39:00"), now, session_start, False))
+                # Same trade, but its BUY was emitted live: a real trade.
+                self.assertFalse(m.is_stale_unannounced_trade(self.ist("09:39:00"), now, session_start, True))
+                # Entered on the latest candle: not stale.
+                self.assertFalse(m.is_stale_unannounced_trade(self.ist("10:39:00"), now, session_start, False))
+                # Entry before the session started (restart recovery) is left alone.
+                self.assertFalse(m.is_stale_unannounced_trade(self.ist("09:20:00"), now, self.ist("10:00:00"), False))
+                self.assertFalse(m.is_stale_unannounced_trade(None, now, session_start, False))
+
+
 class SymbolHelperTests(StrategyTestCase):
     def test_extract_option_strike(self):
         for m in self.each_module():
