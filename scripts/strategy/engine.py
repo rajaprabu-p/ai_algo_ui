@@ -2455,6 +2455,24 @@ def tick_processing_lag_seconds(last_exchange_ts, now_ts) -> float:
     return max(0.0, (now_val - tick_ts).total_seconds())
 
 
+def confirmed_open_paper_buy(live_events) -> Optional[Dict]:
+    """The last emitted BUY event if it has no SELL yet (paper allows one open position), else None."""
+    buys = [e for e in live_events or [] if str(e.get("event_type") or "").upper() == "BUY"]
+    sells = [e for e in live_events or [] if str(e.get("event_type") or "").upper() == "SELL"]
+    return buys[-1] if len(buys) > len(sells) else None
+
+
+def paper_position_matches_buy(position: Dict, buy_event: Dict) -> bool:
+    """True when a rebuilt open position is the same side and contract as the emitted BUY."""
+    if not position or not buy_event:
+        return False
+    if str(position.get("side") or "").upper() != str(buy_event.get("side") or "").upper():
+        return False
+    position_symbol = str(position.get("option_symbol") or "").upper()
+    buy_symbol = str(buy_event.get("option_symbol") or "").upper()
+    return not position_symbol or not buy_symbol or position_symbol == buy_symbol
+
+
 def is_stale_unannounced_trade(entry_time, now_ts, session_start, buy_already_printed: bool) -> bool:
     """True for a rebuilt closed trade whose BUY was never emitted and whose entry is too old.
 
@@ -6543,45 +6561,53 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
             # --- PAPERTRADE_LIVE mode: close simulated open position on shutdown ---
             elif execution_mode == "PAPERTRADE_LIVE":
                 final_trades = live_state.get("final_trades")
-                open_pos = final_trades.attrs.get("open_position") if isinstance(final_trades, pd.DataFrame) else None
-                if not open_pos:
-                    open_pos = live_state.get("paper_open_position")
-                if not open_pos:
+                rebuilt_candidates = [
+                    final_trades.attrs.get("open_position") if isinstance(final_trades, pd.DataFrame) else None,
+                    live_state.get("paper_open_position"),
+                ]
+                # Only a BUY that was actually emitted can be open. The rebuild's
+                # open position may be one the session never took (25 Nov 2026: a
+                # replayed 09:53 entry was closed here at 281 for a fake +6201).
+                last_buy = confirmed_open_paper_buy(live_state.get("live_events") or [])
+                open_pos = None
+                if last_buy is not None:
+                    # Prefer the rebuilt copy of the same position: it carries the high and trailing stop.
+                    open_pos = next(
+                        (c for c in rebuilt_candidates if c and paper_position_matches_buy(c, last_buy)),
+                        None,
+                    )
+                else:
+                    ignored = next((c for c in rebuilt_candidates if c), None)
+                    if ignored:
+                        print(
+                            f"  Ignoring rebuilt open position never bought this session: "
+                            f"{ignored.get('side')} {ignored.get('option_symbol')} entry_time={ignored.get('entry_time')}"
+                        )
+                if last_buy is not None and not open_pos:
                     # A concurrent candle rebuild can replace final_trades between
                     # the last BUY and shutdown. Reconstruct the still-open paper
-                    # position from the event stream before giving up.
-                    paper_events = live_state.get("live_events") or []
-                    buy_events = [
-                        event for event in paper_events
-                        if str(event.get("event_type") or "").upper() == "BUY"
-                    ]
-                    sell_events = [
-                        event for event in paper_events
-                        if str(event.get("event_type") or "").upper() == "SELL"
-                    ]
-                    if len(buy_events) > len(sell_events):
-                        last_buy = buy_events[-1]
-                        open_pos = {
-                            "side": str(last_buy.get("side") or ""),
-                            "option_symbol": str(last_buy.get("option_symbol") or ""),
-                            "option_token": safe_int(last_buy.get("option_token"), 0),
-                            "entry_time": last_buy.get("event_time"),
-                            "entry_reason": str(last_buy.get("event_reason") or ""),
-                            "entry_spot": safe_float(last_buy.get("spot_price"), 0.0),
-                            "entry_price": safe_float(last_buy.get("option_price"), 0.0),
-                            "best_price": safe_float(last_buy.get("option_price"), 0.0),
-                            "high_during_trade": safe_float(last_buy.get("option_price"), 0.0),
-                            "qty": safe_int(last_buy.get("qty"), QTY),
-                            "mtf_entry_label": str(last_buy.get("mtf_label") or ""),
-                            "gap_type": str(last_buy.get("gap_type") or ""),
-                            "gap_points": safe_float(last_buy.get("gap_points"), np.nan),
-                            "gap_pct": safe_float(last_buy.get("gap_pct"), np.nan),
-                            "cpr_type": str(last_buy.get("cpr_type") or ""),
-                            "cpr_width_pct": safe_float(last_buy.get("cpr_width_pct"), np.nan),
-                            "emergency_sl_pct_used": safe_float(last_buy.get("emergency_sl_pct_used"), 0.0),
-                            "emergency_sl_price": safe_float(last_buy.get("emergency_sl_price"), np.nan),
-                            "target_profit_points": safe_float(last_buy.get("target_profit_points"), 50.0),
-                        }
+                    # position from the event stream.
+                    open_pos = {
+                        "side": str(last_buy.get("side") or ""),
+                        "option_symbol": str(last_buy.get("option_symbol") or ""),
+                        "option_token": safe_int(last_buy.get("option_token"), 0),
+                        "entry_time": last_buy.get("event_time"),
+                        "entry_reason": str(last_buy.get("event_reason") or ""),
+                        "entry_spot": safe_float(last_buy.get("spot_price"), 0.0),
+                        "entry_price": safe_float(last_buy.get("option_price"), 0.0),
+                        "best_price": safe_float(last_buy.get("option_price"), 0.0),
+                        "high_during_trade": safe_float(last_buy.get("option_price"), 0.0),
+                        "qty": safe_int(last_buy.get("qty"), QTY),
+                        "mtf_entry_label": str(last_buy.get("mtf_label") or ""),
+                        "gap_type": str(last_buy.get("gap_type") or ""),
+                        "gap_points": safe_float(last_buy.get("gap_points"), np.nan),
+                        "gap_pct": safe_float(last_buy.get("gap_pct"), np.nan),
+                        "cpr_type": str(last_buy.get("cpr_type") or ""),
+                        "cpr_width_pct": safe_float(last_buy.get("cpr_width_pct"), np.nan),
+                        "emergency_sl_pct_used": safe_float(last_buy.get("emergency_sl_pct_used"), 0.0),
+                        "emergency_sl_price": safe_float(last_buy.get("emergency_sl_price"), np.nan),
+                        "target_profit_points": safe_float(last_buy.get("target_profit_points"), 50.0),
+                    }
                 if open_pos:
                     side = str(open_pos.get("side") or "")
                     option_symbol = str(open_pos.get("option_symbol") or "")

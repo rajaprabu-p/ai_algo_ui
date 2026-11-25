@@ -399,6 +399,35 @@ class LiveRebuildThrottleTests(StrategyTestCase):
             self.assertEqual(m.tick_processing_lag_seconds(None, now), 0.0)
 
 
+class ShutdownPaperPositionTests(StrategyTestCase):
+    """25 Nov 2026 v30: events were BUY/SELL/BUY/SELL, yet shutdown closed the rebuild's
+    leftover 09:53 25900CE position at 281 for a fake +6201."""
+
+    @staticmethod
+    def event(kind, side="CE", symbol="NIFTY26D0125900CE", time="09:53"):
+        return {"event_type": kind, "side": side, "option_symbol": symbol,
+                "event_time": pd.Timestamp(f"2026-11-25 {time}", tz="Asia/Kolkata"), "option_price": 185.6}
+
+    def test_open_only_when_a_buy_has_no_sell(self):
+        for m in self.each_module():
+            closed_day = [self.event("BUY", symbol="NIFTY26D0125850CE", time="09:39"), self.event("SELL"),
+                          self.event("BUY"), self.event("SELL")]
+            self.assertIsNone(m.confirmed_open_paper_buy(closed_day))
+            self.assertIsNone(m.confirmed_open_paper_buy([]))
+            self.assertIsNone(m.confirmed_open_paper_buy(None))
+            open_day = closed_day + [self.event("BUY", side="PE", symbol="NIFTY26D0125900PE", time="11:05")]
+            self.assertEqual(m.confirmed_open_paper_buy(open_day)["side"], "PE")
+
+    def test_rebuilt_position_must_match_the_open_buy(self):
+        for m in self.each_module():
+            buy = self.event("BUY")
+            self.assertTrue(m.paper_position_matches_buy({"side": "ce", "option_symbol": "nifty26d0125900ce"}, buy))
+            self.assertTrue(m.paper_position_matches_buy({"side": "CE"}, buy))      # rebuild without a symbol
+            self.assertFalse(m.paper_position_matches_buy({"side": "PE", "option_symbol": "NIFTY26D0125900PE"}, buy))
+            self.assertFalse(m.paper_position_matches_buy({"side": "CE", "option_symbol": "NIFTY26D0125850CE"}, buy))
+            self.assertFalse(m.paper_position_matches_buy(None, buy))
+
+
 class SymbolHelperTests(StrategyTestCase):
     def test_extract_option_strike(self):
         for m in self.each_module():
