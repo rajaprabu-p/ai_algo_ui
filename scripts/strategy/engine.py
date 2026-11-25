@@ -4347,27 +4347,26 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     live_state["last_open_pnl_log_ts"] = now_local
                 return
 
-            open_pos = trades.attrs.get("open_position") if hasattr(trades, "attrs") else None
-            if not open_pos:
-                # Fallback for temporary strategy-attr gaps during stall/rebuild windows.
-                # In paper mode we allow only one open position, so the latest BUY
-                # newer than latest SELL can be treated as currently open.
-                events = live_state.get("live_events") or []
-                last_buy = next((ev for ev in reversed(events) if str(ev.get("event_type") or "").upper() == "BUY"), None)
-                last_sell = next((ev for ev in reversed(events) if str(ev.get("event_type") or "").upper() == "SELL"), None)
-                if last_buy is not None:
-                    buy_ts = pd.Timestamp(last_buy.get("event_time")) if last_buy.get("event_time") is not None else None
-                    sell_ts = pd.Timestamp(last_sell.get("event_time")) if last_sell and last_sell.get("event_time") is not None else None
-                    if sell_ts is None or (buy_ts is not None and buy_ts > sell_ts):
-                        open_pos = {
-                            "side": str(last_buy.get("side") or ""),
-                            "option_symbol": str(last_buy.get("option_symbol") or ""),
-                            "entry_time": last_buy.get("event_time"),
-                            "entry_reason": str(last_buy.get("event_reason") or ""),
-                            "entry_price": safe_float(last_buy.get("option_price"), 0.0),
-                            "qty": safe_int(last_buy.get("qty"), QTY),
-                            "emergency_sl_price": safe_float(last_buy.get("emergency_sl_price"), np.nan),
-                        }
+            # Same rule as the shutdown close: only an emitted BUY without a SELL is
+            # open. A rebuilt position the session never bought (25 Nov 2026: a
+            # replayed 09:53 entry shown as +6201 open P&L) is not reported.
+            last_buy = confirmed_open_paper_buy(live_state.get("live_events") or [])
+            open_pos = None
+            if last_buy is not None:
+                rebuilt_pos = trades.attrs.get("open_position") if hasattr(trades, "attrs") else None
+                if rebuilt_pos and paper_position_matches_buy(rebuilt_pos, last_buy):
+                    open_pos = rebuilt_pos
+                else:
+                    # Rebuild gap (or mismatch): report the position from its BUY event.
+                    open_pos = {
+                        "side": str(last_buy.get("side") or ""),
+                        "option_symbol": str(last_buy.get("option_symbol") or ""),
+                        "entry_time": last_buy.get("event_time"),
+                        "entry_reason": str(last_buy.get("event_reason") or ""),
+                        "entry_price": safe_float(last_buy.get("option_price"), 0.0),
+                        "qty": safe_int(last_buy.get("qty"), QTY),
+                        "emergency_sl_price": safe_float(last_buy.get("emergency_sl_price"), np.nan),
+                    }
 
             if not open_pos:
                 live_state["last_open_pnl_event_id"] = None
