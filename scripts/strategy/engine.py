@@ -2413,6 +2413,48 @@ def strike_switch_entry_floor(switch_candle_ts, current_floor=None) -> Optional[
     return switch_ts if floor_ts is None else max(floor_ts, switch_ts)
 
 
+REBUILD_HEARTBEAT_SECONDS = 5      # paper/live: rebuild at least this often even with no new candle
+TICK_LAG_WARN_SECONDS = 10         # warn when ticks are processed this far behind the exchange
+TICK_LAG_WARN_INTERVAL_SECONDS = 60
+
+
+def candle_data_signature(live_state: Dict) -> tuple:
+    """Cheap fingerprint of the completed candles a rebuild would evaluate.
+
+    Changes when a candle is appended or rewritten, or when a strike switch or
+    history backfill replaces the rows.
+    """
+    parts = [safe_int(live_state.get("current_ce_token"), 0), safe_int(live_state.get("current_pe_token"), 0)]
+    for key in ("spot", "ce", "pe"):
+        rows = live_state.get(f"{key}_rows") or []
+        last = rows[-1] if rows else {}
+        first = rows[0] if rows else {}
+        parts.append((len(rows), first.get("ts"), first.get("close"), last.get("ts"), last.get("close")))
+    return tuple(parts)
+
+
+def live_rebuild_due(data_sig, last_data_sig, now_mono: float, last_rebuild_mono, heartbeat_seconds: float) -> bool:
+    """Rebuild on new candle data, else at most once per heartbeat.
+
+    Rebuilding the whole day on every tick batch fell behind the tick stream
+    once the day grew (25 Nov 2026: 20-45 min behind from ~10:17, then Kite
+    dropped the socket). Tick-level stops run per tick in
+    sync_paper_position_from_tick, which rebuilds directly on a hit.
+    """
+    if data_sig != last_data_sig or last_rebuild_mono is None:
+        return True
+    return (now_mono - last_rebuild_mono) >= heartbeat_seconds
+
+
+def tick_processing_lag_seconds(last_exchange_ts, now_ts) -> float:
+    """Seconds between now and the exchange time of the tick being processed (0 if unknown)."""
+    tick_ts = _as_ist_timestamp(last_exchange_ts)
+    now_val = _as_ist_timestamp(now_ts)
+    if tick_ts is None or now_val is None:
+        return 0.0
+    return max(0.0, (now_val - tick_ts).total_seconds())
+
+
 def is_stale_unannounced_trade(entry_time, now_ts, session_start, buy_already_printed: bool) -> bool:
     """True for a rebuilt closed trade whose BUY was never emitted and whose entry is too old.
 
@@ -4951,6 +4993,11 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                     print(f"[PERIODIC SYMBOL REFRESH ERROR] {_ref_exc}")
                 live_state["last_symbol_refresh_ts"] = now_for_refresh
 
+        # Taken before the evaluation: rows that change during it (a POST_EXIT
+        # strike switch) differ from this and get their own rebuild next batch.
+        live_state["last_rebuild_data_sig"] = candle_data_signature(live_state)
+        live_state["last_rebuild_mono"] = time.monotonic()
+
         spot_df = rows_to_df(live_state["spot_rows"])
         ce_df = rows_to_df(live_state["ce_rows"])
         pe_df = rows_to_df(live_state["pe_rows"])
@@ -5947,7 +5994,31 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                 append_completed_row(key, minute_ts, state)
                 del live_state["current"][token]
         if live_state["spot_rows"] and live_state["ce_rows"] and live_state["pe_rows"]:
-            rebuild_and_print()
+            if force_all or live_rebuild_due(
+                candle_data_signature(live_state),
+                live_state.get("last_rebuild_data_sig"),
+                time.monotonic(),
+                live_state.get("last_rebuild_mono"),
+                REBUILD_HEARTBEAT_SECONDS,
+            ):
+                rebuild_started = time.perf_counter()
+                rebuild_and_print()
+                live_state["last_rebuild_seconds"] = time.perf_counter() - rebuild_started
+
+    def warn_if_ticks_lagging() -> None:
+        """Log when ticks are being processed well behind the exchange (throttled)."""
+        lag = tick_processing_lag_seconds(live_state.get("last_tick_exchange_ts"), datetime.now(IST))
+        if lag < TICK_LAG_WARN_SECONDS:
+            return
+        now_mono = time.monotonic()
+        last_warn = live_state.get("last_tick_lag_warn_mono")
+        if last_warn is not None and now_mono - last_warn < TICK_LAG_WARN_INTERVAL_SECONDS:
+            return
+        live_state["last_tick_lag_warn_mono"] = now_mono
+        print(
+            f"[TICK LAG] processing ticks {lag:.0f}s behind the exchange; "
+            f"last rebuild took {safe_float(live_state.get('last_rebuild_seconds'), 0.0):.2f}s"
+        )
 
     def refresh_stale_open_position_ltp() -> None:
         """Safety net for a single option leg's tick stream silently stalling.
@@ -6249,6 +6320,7 @@ def run_live_session(kite: KiteConnect, ce_symbol: str, pe_symbol: str, ce_token
                         print(f"[Excel write error] {_exc}")
 
             detect_tick_stall()
+            warn_if_ticks_lagging()
             now_local = datetime.now(IST)
             if not live_state.get("force_exit_triggered") and now_local >= force_exit_ts:
                 live_state["force_exit_triggered"] = True

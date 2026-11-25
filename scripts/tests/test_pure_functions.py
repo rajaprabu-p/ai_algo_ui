@@ -353,6 +353,52 @@ class StrikeSwitchReplayTests(StrategyTestCase):
                 self.assertFalse(m.is_stale_unannounced_trade(None, now, session_start, False))
 
 
+class LiveRebuildThrottleTests(StrategyTestCase):
+    """25 Nov 2026: a full-day rebuild on every tick batch fell 20-45 min behind the ticks."""
+
+    @staticmethod
+    def row(hhmm, close):
+        return {"ts": pd.Timestamp(f"2026-11-25 {hhmm}", tz="Asia/Kolkata"), "open": close,
+                "high": close, "low": close, "close": close, "volume": 0.0}
+
+    def state(self):
+        return {"current_ce_token": 1, "current_pe_token": 2,
+                "spot_rows": [self.row("09:15", 25700.0), self.row("09:16", 25710.0)],
+                "ce_rows": [self.row("09:15", 240.0), self.row("09:16", 245.0)],
+                "pe_rows": [self.row("09:15", 220.0), self.row("09:16", 215.0)]}
+
+    def test_signature_tracks_candle_changes_only(self):
+        for m in self.each_module():
+            base = self.state()
+            sig = m.candle_data_signature(base)
+            self.assertEqual(m.candle_data_signature(self.state()), sig)       # same candles
+            appended = self.state()
+            appended["spot_rows"].append(self.row("09:17", 25720.0))           # new completed candle
+            self.assertNotEqual(m.candle_data_signature(appended), sig)
+            rewritten = self.state()
+            rewritten["ce_rows"][-1] = self.row("09:16", 246.0)                # same minute, new close
+            self.assertNotEqual(m.candle_data_signature(rewritten), sig)
+            switched = self.state()
+            switched.update(current_ce_token=3, ce_rows=[self.row("09:15", 199.0), self.row("09:16", 245.0)])
+            self.assertNotEqual(m.candle_data_signature(switched), sig)       # strike switch reload
+            self.assertEqual(len(m.candle_data_signature({})), 5)              # empty state is fine
+
+    def test_rebuild_due_on_new_data_or_heartbeat(self):
+        for m in self.each_module():
+            self.assertTrue(m.live_rebuild_due("a", None, 100.0, None, 3))     # first rebuild
+            self.assertTrue(m.live_rebuild_due("b", "a", 100.5, 100.0, 3))     # new candle data
+            self.assertFalse(m.live_rebuild_due("a", "a", 101.0, 100.0, 3))    # quiet tick batch
+            self.assertTrue(m.live_rebuild_due("a", "a", 103.0, 100.0, 3))     # heartbeat
+
+    def test_tick_lag_seconds(self):
+        for m in self.each_module():
+            now = pd.Timestamp("2026-11-25 11:39:28", tz="Asia/Kolkata")
+            # Kite exchange timestamps are naive IST: 11:01:06 handled at 11:39:28.
+            self.assertEqual(m.tick_processing_lag_seconds(pd.Timestamp("2026-11-25 11:01:06"), now), 2302.0)
+            self.assertEqual(m.tick_processing_lag_seconds(now + pd.Timedelta(seconds=2), now), 0.0)
+            self.assertEqual(m.tick_processing_lag_seconds(None, now), 0.0)
+
+
 class SymbolHelperTests(StrategyTestCase):
     def test_extract_option_strike(self):
         for m in self.each_module():
